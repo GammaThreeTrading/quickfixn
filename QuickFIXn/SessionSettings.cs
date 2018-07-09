@@ -66,6 +66,12 @@ namespace QuickFix
         public const string RESETSEQUENCE_MESSAGE_REQUIRES_ORIGSENDINGTIME = "RequiresOrigSendingTime";
         public const string CHECK_LATENCY = "CheckLatency";
         public const string MAX_LATENCY = "MaxLatency";
+        public const string ODBC_STORE_CONNECTION_STRING = "OdbcStoreConnectionString";
+        public const string ODBC_LOG_CONNECTION_STRING = "OdbcLogConnectionString";
+        public const string ODBC_STORE_USER = "OdbcStoreUser";
+        public const string ODBC_STORE_PASSWORD = "OdbcStorePassword";
+        public const string ODBC_LOG_USER = "OdbcLogUser";
+        public const string ODBC_LOG_PASSWORD = "OdbcLogPassword";
 
 
         public const string SSL_ENABLE = "SSLEnable";

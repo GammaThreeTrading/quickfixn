@@ -31,8 +31,14 @@ namespace TradeClient
             {
                 QuickFix.SessionSettings settings = new QuickFix.SessionSettings(file);
                 TradeClientApp application = new TradeClientApp();
-                QuickFix.IMessageStoreFactory storeFactory = new QuickFix.FileStoreFactory(settings);
+
+                QuickFix.IMessageStoreFactory storeFactory = new QuickFix.ODBCStoreFactory(settings);
                 QuickFix.ILogFactory logFactory = new QuickFix.ScreenLogFactory(settings);
+
+                //QuickFix.IMessageStoreFactory storeFactory = new QuickFix.FileStoreFactory(settings);
+                //QuickFix.ILogFactory logFactory = new QuickFix.ScreenLogFactory(settings);
+
+
                 QuickFix.Transport.SocketInitiator initiator = new QuickFix.Transport.SocketInitiator(application, storeFactory, settings, logFactory);
 
                 // this is a developer-test kludge.  do not emulate.

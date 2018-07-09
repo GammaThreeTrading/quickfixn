@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "Examples.TradeClient": {
+      "commandName": "Project",
+      "commandLineArgs": "tradeclient.cfg"
+    }
+  }
+}
