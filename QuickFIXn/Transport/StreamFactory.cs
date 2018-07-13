@@ -204,7 +204,15 @@ namespace QuickFix.Transport
                 }
                 catch (System.Security.Authentication.AuthenticationException ex)
                 {
-                    log_.OnEvent("Unable to perform authentication against server: " + ex.Message);
+                    if (log_ != null)
+                    {
+                        log_.OnEvent("Unable to perform authentication against server: " + ex.Message);
+                    }
+                    else
+                    {
+                        Console.WriteLine("Unable to perform authentication against server: " + ex.Message);
+                    }
+                    
                     throw;
                 }
 
@@ -234,7 +242,15 @@ namespace QuickFix.Transport
                 }
                 catch (System.Security.Authentication.AuthenticationException ex)
                 {
-                    log_.OnEvent("Unable to perform authentication against server: " + ex.Message);
+                    if(log_ != null)
+                    {
+                        log_.OnEvent("Unable to perform authentication against server: " + ex.Message);
+                    }
+                    else
+                    {
+                        Console.WriteLine("Unable to perform authentication against server: " + ex.Message);
+                    }
+                    
                     throw;
                 }
 
@@ -300,9 +316,30 @@ namespace QuickFix.Transport
                 if (!ContainsEnhancedKeyUsage(certificate, enhancedKeyUsage))
                 {
                     if (enhancedKeyUsage == clientAuthenticationOid)
-                        log_.OnEvent("Remote certificate is not intended for client authentication: It is missing enhanced key usage " + enhancedKeyUsage);
+                    {
+                        if(log_ != null)
+                        {
+                            log_.OnEvent("Remote certificate is not intended for client authentication: It is missing enhanced key usage " + enhancedKeyUsage);
+                        }
+                        else
+                        {
+                            Console.WriteLine("Remote certificate is not intended for client authentication: It is missing enhanced key usage " + enhancedKeyUsage);
+                        }
+                        
+                    }
+                        
                     else
-                        log_.OnEvent("Remote certificate is not intended for server authentication: It is missing enhanced key usage " + enhancedKeyUsage);
+                    {
+                        if(log_ != null)
+                        {
+                            log_.OnEvent("Remote certificate is not intended for server authentication: It is missing enhanced key usage " + enhancedKeyUsage);
+                        }
+                        else
+                        {
+                            Console.WriteLine("Remote certificate is not intended for server authentication: It is missing enhanced key usage " + enhancedKeyUsage);
+                        }
+
+                    }
 
                     return false;
                 }
@@ -329,7 +366,15 @@ namespace QuickFix.Transport
                 // Any basic authentication check failed, do after checking CA
                 if (sslPolicyErrors != SslPolicyErrors.None)
                 {
-                    log_.OnEvent("Remote certificate was not recognized as a valid certificate: " + sslPolicyErrors);
+                    if(log_ != null)
+                    {
+                        log_.OnEvent("Remote certificate was not recognized as a valid certificate: " + sslPolicyErrors);
+                    }
+                    else
+                    {
+                        Console.WriteLine("Remote certificate was not recognized as a valid certificate: " + sslPolicyErrors);
+                    }
+                    
                     return false;
                 }
 

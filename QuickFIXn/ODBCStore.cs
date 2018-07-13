@@ -220,6 +220,7 @@ namespace QuickFix
 
         public void Reset()
         {
+            cache_.Reset();
             string queryString = string.Empty;
 
             queryString = queryString + "DELETE from messages WHERE " +
