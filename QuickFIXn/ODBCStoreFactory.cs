@@ -27,7 +27,7 @@ namespace QuickFix
             if(settings_.Get(sessionID).Has(SessionSettings.ODBC_STORE_USER))
                 user = settings_.Get(sessionID).GetString(SessionSettings.ODBC_STORE_USER);
 
-            if (settings_.Get(sessionID).Has(SessionSettings.ODBC_STORE_USER))
+            if (settings_.Get(sessionID).Has(SessionSettings.ODBC_STORE_PASSWORD))
                 password = settings_.Get(sessionID).GetString(SessionSettings.ODBC_STORE_PASSWORD);
             
             string connectionString = settings_.Get(sessionID).GetString(SessionSettings.ODBC_STORE_CONNECTION_STRING);

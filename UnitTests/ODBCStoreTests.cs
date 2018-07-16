@@ -75,10 +75,11 @@ namespace UnitTests
         [Test]
         public void incNextSenderMsgSeqNumTest()
         {
+            int nNextSender = store.GetNextSenderMsgSeqNum();
             store.IncrNextSenderMsgSeqNum();
-            Assert.AreEqual(2, store.GetNextSenderMsgSeqNum());
+            Assert.AreEqual(nNextSender+1, store.GetNextSenderMsgSeqNum());
             rebuildStore();
-            Assert.AreEqual(2, store.GetNextSenderMsgSeqNum());
+            Assert.AreEqual(nNextSender + 1, store.GetNextSenderMsgSeqNum());
         }
 
         [Test]
@@ -94,10 +95,12 @@ namespace UnitTests
         [Test]
         public void incNextTargetMsgSeqNumTest()
         {
+            int nNextTarget = store.GetNextTargetMsgSeqNum();
+
             store.IncrNextTargetMsgSeqNum();
-            Assert.AreEqual(2, store.GetNextTargetMsgSeqNum());
+            Assert.AreEqual(nNextTarget+1, store.GetNextTargetMsgSeqNum());
             rebuildStore();
-            Assert.AreEqual(2, store.GetNextTargetMsgSeqNum());
+            Assert.AreEqual(nNextTarget+1, store.GetNextTargetMsgSeqNum());
         }
 
         [Test]
