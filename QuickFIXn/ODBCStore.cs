@@ -20,7 +20,7 @@ namespace QuickFix
             return strFinal;
         }
     }
-    class ODBCStore : IMessageStore
+    public class ODBCStore : IMessageStore
     {
         private MemoryStore cache_ = new MemoryStore();
 
