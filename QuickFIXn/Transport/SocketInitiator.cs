@@ -79,8 +79,9 @@ namespace QuickFix.Transport
             {
                 t.Session.Log.OnEvent("Connection failed (AuthenticationException): " + ex.Message);
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                Console.WriteLine(ex.Message);
                 // It might be the logger ObjectDisposedException, so don't try to log!
             }
             finally
