@@ -155,3 +155,4 @@ UpgradeLog*.htm
 
 # Microsoft Fakes
 FakesAssemblies/
+/QuickFIXn/Properties/launchSettings.json
