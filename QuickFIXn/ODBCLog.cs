@@ -46,12 +46,12 @@ namespace QuickFix
             string whereClause = string.Empty;
             if(this._sessionID != null)
             {
-                whereClause = whereClause + "WHERE BeginString = '" + _sessionID.BeginString + "' " +
-                    "AND SenderCompID = '" + _sessionID.SenderCompID + "' " +
-                    "AND TargetCompID = '" + _sessionID.TargetCompID + "' ";
+                whereClause = whereClause + "WHERE beginstring = '" + _sessionID.BeginString + "' " +
+                    "AND sendercompid = '" + _sessionID.SenderCompID + "' " +
+                    "AND targetcompid = '" + _sessionID.TargetCompID + "' ";
 
                 if (_sessionID.SessionQualifier.Length > 0)
-                    whereClause = whereClause + "AND SessionQualifier = '" + _sessionID.SessionQualifier + "' ";
+                    whereClause = whereClause + "AND session_qualifier = '" + _sessionID.SessionQualifier + "' ";
             }
             
             OdbcCommand cmd = new OdbcCommand("DELETE FROM " + eventTable + " " + whereClause, odbc);
@@ -128,7 +128,8 @@ namespace QuickFix
                 "'" + _sessionID.TargetCompID + "', ";
 
             if (_sessionID.SessionQualifier != null && _sessionID.SessionQualifier.Length > 0)
-                queryString = queryString + "'" + _sessionID.SessionQualifier + "', ";
+                queryString
+                    = queryString + "'" + _sessionID.SessionQualifier + "', ";
             else
                 queryString = queryString + "'" + "NULL" + "', ";
 
