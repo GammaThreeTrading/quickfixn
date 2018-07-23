@@ -12,37 +12,48 @@ namespace QuickFix
     /// </summary>
     public class ODBCLog : ILog, System.IDisposable
     {
+        private string incomingTable = "messages_log";
+        private string outgoingTable = "messages_log";
+        private string eventTable = "event_log";
+        private SessionID _sessionID;
+        private string _connectionString = string.Empty;
+        private string _user = string.Empty;
+        private string _pwd = string.Empty;
+        private SessionSettings _sessionSettings;
+        
+
         public ODBCLog(SessionSettings settings, SessionID sessionID)
         {
             _sessionID = sessionID;
             _sessionSettings = settings;
 
-
-            string user = string.Empty;
             if( _sessionSettings.Get(sessionID).Has(SessionSettings.ODBC_LOG_USER))
-                user = _sessionSettings.Get(sessionID).GetString(SessionSettings.ODBC_LOG_USER);
-            string password = string.Empty;
+                _user = _sessionSettings.Get(sessionID).GetString(SessionSettings.ODBC_LOG_USER);
+
             if(_sessionSettings.Get(sessionID).Has(SessionSettings.ODBC_LOG_PASSWORD))
-                password = _sessionSettings.Get(sessionID).GetString(SessionSettings.ODBC_LOG_PASSWORD);
+                _pwd = _sessionSettings.Get(sessionID).GetString(SessionSettings.ODBC_LOG_PASSWORD);
 
-            string connectionString = _sessionSettings.Get(sessionID).GetString(SessionSettings.ODBC_LOG_CONNECTION_STRING);
+            _connectionString = _sessionSettings.Get(sessionID).GetString(SessionSettings.ODBC_LOG_CONNECTION_STRING);
 
-            OdbcConnectionStringBuilder sb = new OdbcConnectionStringBuilder(connectionString);
-            sb["UID"] = user;
-            sb["PWD"] = password;
-            odbc = new OdbcConnection(sb.ConnectionString);
-            odbc.Open();
+            OdbcConnection odbc = GetODBCConnection();
         }
 
-        private string incomingTable = "messages_log";
-        private string outgoingTable = "messages_log";
-        private string eventTable = "event_log";
-        private SessionID _sessionID;
-        private SessionSettings _sessionSettings;
-        private OdbcConnection odbc;
+
+        private OdbcConnection GetODBCConnection()
+        {
+            OdbcConnectionStringBuilder sb = new OdbcConnectionStringBuilder(_connectionString);
+            sb["UID"] = _user;
+            sb["PWD"] = _pwd;
+            OdbcConnection odbc = new OdbcConnection(sb.ConnectionString);
+            odbc.Open();
+            return odbc;
+        }
+
 
         public void Clear()
         {
+            OdbcConnection odbc = GetODBCConnection();
+
             string whereClause = string.Empty;
             if(this._sessionID != null)
             {
@@ -84,7 +95,7 @@ namespace QuickFix
             }
 
             queryString = queryString + "'" + msg + "')";
-
+            OdbcConnection odbc = GetODBCConnection();
             OdbcCommand cmd = new OdbcCommand(queryString, odbc);
             cmd.ExecuteNonQuery();
         }
@@ -114,7 +125,7 @@ namespace QuickFix
             }
 
             queryString = queryString + "'" + msg + "')";
-
+            OdbcConnection odbc = GetODBCConnection();
             OdbcCommand cmd = new OdbcCommand(queryString, odbc);
             cmd.ExecuteNonQuery();
         }
@@ -134,7 +145,7 @@ namespace QuickFix
                 queryString = queryString + "'" + "NULL" + "', ";
 
             queryString = queryString + "'" +s + "')";
-
+            OdbcConnection odbc = GetODBCConnection();
             OdbcCommand cmd = new OdbcCommand(queryString, odbc);
             cmd.ExecuteNonQuery();
 
