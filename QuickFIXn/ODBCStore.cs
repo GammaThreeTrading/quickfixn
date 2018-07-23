@@ -119,8 +119,9 @@ namespace QuickFix
         public bool Set(int msgSeqNum, string msg)
         {
             string queryString = string.Empty;
-            string msgCopy = msg;
-            msgCopy.Replace("'", "''");
+
+            if (msg.Contains("'"))
+                msg = msg.Replace("'", "''");
 
                 queryString = "INSERT INTO messages " +
                     "(beginstring, sendercompid, targetcompid, session_qualifier, msgseqnum, message) " +
@@ -131,7 +132,7 @@ namespace QuickFix
                     "'" + _sessionID.TargetCompID + "'," +
                     "'" + _sessionID.SessionQualifier + "'," +
                     msgSeqNum.ToString() + "," +
-                    "'" + msgCopy + "')";
+                    "'" + msg + "')";
 
 
 
@@ -142,7 +143,7 @@ namespace QuickFix
                 string updateQuery = string.Empty;
 
 
-                    updateQuery = "UDPATE messages SET message='" + msgCopy + "' WHERE " +
+                    updateQuery = "UDPATE messages SET message='" + msg + "' WHERE " +
                         "beginstring=" + "'" + _sessionID.BeginString + "' and " +
                         "sendercompid=" + "'" + _sessionID.SenderCompID + "' and " +
                         "targetcompid=" + "'" + _sessionID.TargetCompID + "' and " +

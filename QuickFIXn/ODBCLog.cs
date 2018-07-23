@@ -72,6 +72,9 @@ namespace QuickFix
 
         public void OnIncoming(string msg)
         {
+            if (msg.Contains("'"))
+                msg = msg.Replace("'", "''");
+
             string queryString = "INSERT INTO ";
 
             queryString = queryString + incomingTable + " " +
@@ -102,6 +105,9 @@ namespace QuickFix
 
         public void OnOutgoing(string msg)
         {
+            if (msg.Contains("'"))
+                msg = msg.Replace("'", "''");
+
             string queryString = "INSERT INTO ";
 
             queryString = queryString + outgoingTable + " " +
@@ -132,22 +138,34 @@ namespace QuickFix
 
         public void OnEvent(string s)
         {
-            string queryString = "INSERT INTO " + eventTable + " "  + "(time, beginstring, sendercompid, targetcompid, session_qualifier, text) " + "VALUES (" +
-                "'" + ODBCHelper.DateTimeToODBCConverter(DateTime.UtcNow) + "', " +
-                "'" + _sessionID.BeginString + "', " +
-                "'" + _sessionID.SenderCompID + "', " +
-                "'" + _sessionID.TargetCompID + "', ";
+            try
+            {
+                if (s.Contains("'"))
+                    s = s.Replace("'", "''");
 
-            if (_sessionID.SessionQualifier != null && _sessionID.SessionQualifier.Length > 0)
-                queryString
-                    = queryString + "'" + _sessionID.SessionQualifier + "', ";
-            else
-                queryString = queryString + "'" + "NULL" + "', ";
+                string queryString = "INSERT INTO " + eventTable + " " + "(time, beginstring, sendercompid, targetcompid, session_qualifier, text) " + "VALUES (" +
+    "'" + ODBCHelper.DateTimeToODBCConverter(DateTime.UtcNow) + "', " +
+    "'" + _sessionID.BeginString + "', " +
+    "'" + _sessionID.SenderCompID + "', " +
+    "'" + _sessionID.TargetCompID + "', ";
 
-            queryString = queryString + "'" +s + "')";
-            OdbcConnection odbc = GetODBCConnection();
-            OdbcCommand cmd = new OdbcCommand(queryString, odbc);
-            cmd.ExecuteNonQuery();
+                if (_sessionID.SessionQualifier != null && _sessionID.SessionQualifier.Length > 0)
+                    queryString
+                        = queryString + "'" + _sessionID.SessionQualifier + "', ";
+                else
+                    queryString = queryString + "'" + "NULL" + "', ";
+
+                queryString = queryString + "'" + s + "')";
+                OdbcConnection odbc = GetODBCConnection();
+                OdbcCommand cmd = new OdbcCommand(queryString, odbc);
+
+                cmd.ExecuteNonQuery();
+            }
+            catch(Exception ex)
+            {
+                Console.WriteLine(ex.Message);
+            }
+
 
             //throw new NotImplementedException();
         }
