@@ -72,6 +72,14 @@ namespace QuickFix
         public const string ODBC_STORE_PASSWORD = "OdbcStorePassword";
         public const string ODBC_LOG_USER = "OdbcLogUser";
         public const string ODBC_LOG_PASSWORD = "OdbcLogPassword";
+        public const string ODBC_LOG_INCOMING_TABLE = "OdbcLogIncomingTable";
+        public const string ODBC_LOG_INCOMING_BACKUP_TABLE = "OdbcLogIncomingBackupTable";
+        public const string ODBC_LOG_OUTGOING_TABLE = "OdbcLogOutgoingTable";
+        public const string ODBC_LOG_OUTGOING_BACKUP_TABLE = "OdbcLogOutgoingBackupTable";
+        public const string ODBC_LOG_EVENT_TABLE = "OdbcLogEventTable";
+        public const string ODBC_LOG_EVENT_BACKUP_TABLE = "OdbcLogEventBackupTable";
+        public const string ODBC_STORE_SESSION_TABLE = "OdbcStoreSessionTable";
+        public const string ODBC_STORE_MESSAGES_TABLE = "OdbcStoreMessagesTable";
 
 
         public const string SSL_ENABLE = "SSLEnable";

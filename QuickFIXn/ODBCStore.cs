@@ -26,10 +26,23 @@ namespace QuickFix
 
         private SessionID _sessionID;
         private OdbcConnection odbc;
+        private SessionSettings _sessionSettings;
 
-        public ODBCStore(SessionID sessionId, string user, string password, string connectionString)
+        private string messages_table = "messages";
+        private string sessions_table = "sessions";
+
+        public ODBCStore(SessionID sessionId, string user, string password, string connectionString, SessionSettings settings)
         {
             _sessionID = sessionId;
+            _sessionSettings = settings;
+
+
+            if (_sessionSettings.Get(_sessionID).Has(SessionSettings.ODBC_STORE_SESSION_TABLE))
+                sessions_table = _sessionSettings.Get(_sessionID).GetString(SessionSettings.ODBC_STORE_SESSION_TABLE);
+
+            if (_sessionSettings.Get(_sessionID).Has(SessionSettings.ODBC_STORE_MESSAGES_TABLE))
+                messages_table = _sessionSettings.Get(_sessionID).GetString(SessionSettings.ODBC_STORE_MESSAGES_TABLE);
+
             OdbcConnectionStringBuilder sb = new OdbcConnectionStringBuilder(connectionString);
             sb["UID"] = user;
             sb["PWD"] = password;
@@ -42,7 +55,7 @@ namespace QuickFix
         {
             string queryString = string.Empty;
 
-                queryString = "SELECT creation_time, incoming_seqnum, outgoing_seqnum FROM sessions WHERE " +
+                queryString = "SELECT creation_time, incoming_seqnum, outgoing_seqnum FROM " + sessions_table + " WHERE " +
                     "beginstring=" + "'" + _sessionID.BeginString + "' and " +
                     "sendercompid=" + "'" + _sessionID.SenderCompID + "' and " +
                     "targetcompid=" + "'" + _sessionID.TargetCompID + "' and " +
@@ -71,7 +84,7 @@ namespace QuickFix
                 else
                 {
                     DateTime createTime = cache_.CreationTime.HasValue ? cache_.CreationTime.Value : DateTime.UtcNow;
-                    string insertQuery = "INSERT INTO sessions (beginstring, sendercompid, targetcompid, session_qualifier," +
+                    string insertQuery = "INSERT INTO " + sessions_table + " (beginstring, sendercompid, targetcompid, session_qualifier," +
                         "creation_time, incoming_seqnum, outgoing_seqnum) VALUES(" +
                         "'" + _sessionID.BeginString + "'," +
                         "'" + _sessionID.SenderCompID + "'," +
@@ -94,7 +107,7 @@ namespace QuickFix
             string queryString = string.Empty;
 
 
-                queryString = queryString + "SELECT message FROM messages WHERE " +
+                queryString = queryString + "SELECT message FROM " + messages_table + " WHERE " +
                     "beginstring=" + "'" + _sessionID.BeginString + "' and " +
                     "sendercompid=" + "'" + _sessionID.SenderCompID + "' and " +
                     "targetcompid=" + "'" + _sessionID.TargetCompID + "' and " +
@@ -123,8 +136,8 @@ namespace QuickFix
             if (msg.Contains("'"))
                 msg = msg.Replace("'", "''");
 
-                queryString = "INSERT INTO messages " +
-                    "(beginstring, sendercompid, targetcompid, session_qualifier, msgseqnum, message) " +
+                queryString = "INSERT INTO " + messages_table + 
+                    " (beginstring, sendercompid, targetcompid, session_qualifier, msgseqnum, message) " +
                     "VALUES (" +
 
                     "'" + _sessionID.BeginString + "'," +
@@ -143,7 +156,7 @@ namespace QuickFix
                 string updateQuery = string.Empty;
 
 
-                    updateQuery = "UDPATE messages SET message='" + msg + "' WHERE " +
+                    updateQuery = "UDPATE " + messages_table + " SET message='" + msg + "' WHERE " +
                         "beginstring=" + "'" + _sessionID.BeginString + "' and " +
                         "sendercompid=" + "'" + _sessionID.SenderCompID + "' and " +
                         "targetcompid=" + "'" + _sessionID.TargetCompID + "' and " +
@@ -174,7 +187,7 @@ namespace QuickFix
         {
             string queryString = string.Empty;
 
-                queryString = queryString + "UPDATE sessions SET outgoing_seqnum=" + value.ToString() + " WHERE " +
+                queryString = queryString + "UPDATE " + sessions_table + " SET outgoing_seqnum=" + value.ToString() + " WHERE " +
                     "beginstring=" + "'" + _sessionID.BeginString + "' and " +
                     "sendercompid=" + "'" + _sessionID.SenderCompID + "' and " +
                     "targetcompid=" + "'" + _sessionID.TargetCompID + "' and " +
@@ -192,7 +205,7 @@ namespace QuickFix
             string queryString = string.Empty;
 
 
-                queryString = queryString + "UPDATE sessions SET incoming_seqnum=" + value.ToString() + " WHERE " +
+                queryString = queryString + "UPDATE " + sessions_table + " SET incoming_seqnum=" + value.ToString() + " WHERE " +
                     "beginstring=" + "'" + _sessionID.BeginString + "' and " +
                     "sendercompid=" + "'" + _sessionID.SenderCompID + "' and " +
                     "targetcompid=" + "'" + _sessionID.TargetCompID + "' and " +
@@ -236,7 +249,7 @@ namespace QuickFix
             OdbcCommand cmdReset = null;
 
 
-                queryString = queryString + "DELETE from messages WHERE " +
+                queryString = queryString + "DELETE from " + messages_table + " WHERE " +
                     "beginstring=" + "'" + _sessionID.BeginString + "' and " +
                     "sendercompid=" + "'" + _sessionID.SenderCompID + "' and " +
                     "targetcompid=" + "'" + _sessionID.TargetCompID + "' and " +
@@ -252,7 +265,7 @@ namespace QuickFix
 
             string sqlTime = ODBCHelper.DateTimeToODBCConverter(time.Value);
 
-                queryString = "UPDATE sessions SET creation_time={ts '" + sqlTime + "'}, " +
+                queryString = "UPDATE " + sessions_table + " SET creation_time={ts '" + sqlTime + "'}, " +
                      "incoming_seqnum=" + cache_.GetNextTargetMsgSeqNum() + ", "
                     + "outgoing_seqnum=" + cache_.GetNextSenderMsgSeqNum() + " WHERE "
                     + "beginstring=" + "'" + _sessionID.BeginString + "' and "

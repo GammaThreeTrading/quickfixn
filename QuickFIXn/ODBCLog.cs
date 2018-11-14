@@ -13,8 +13,11 @@ namespace QuickFix
     public class ODBCLog : ILog, System.IDisposable
     {
         private string incomingTable = "messages_log";
+        private string incomingBackupTable = "messages_backup_log";
         private string outgoingTable = "messages_log";
+        private string outgoingBackupTable = "messages_backup_log";
         private string eventTable = "event_log";
+        private string eventBackupTable = "event_backup_log";
         private SessionID _sessionID;
         private string _connectionString = string.Empty;
         private string _user = string.Empty;
@@ -32,6 +35,24 @@ namespace QuickFix
 
             if(_sessionSettings.Get(sessionID).Has(SessionSettings.ODBC_LOG_PASSWORD))
                 _pwd = _sessionSettings.Get(sessionID).GetString(SessionSettings.ODBC_LOG_PASSWORD);
+
+            if (_sessionSettings.Get(sessionID).Has(SessionSettings.ODBC_LOG_INCOMING_TABLE))
+                incomingTable = _sessionSettings.Get(sessionID).GetString(SessionSettings.ODBC_LOG_INCOMING_TABLE);
+
+            if (_sessionSettings.Get(sessionID).Has(SessionSettings.ODBC_LOG_INCOMING_BACKUP_TABLE))
+                incomingBackupTable = _sessionSettings.Get(sessionID).GetString(SessionSettings.ODBC_LOG_INCOMING_BACKUP_TABLE);
+
+            if (_sessionSettings.Get(sessionID).Has(SessionSettings.ODBC_LOG_OUTGOING_TABLE))
+                outgoingTable = _sessionSettings.Get(sessionID).GetString(SessionSettings.ODBC_LOG_OUTGOING_TABLE);
+
+            if (_sessionSettings.Get(sessionID).Has(SessionSettings.ODBC_LOG_OUTGOING_BACKUP_TABLE))
+                outgoingBackupTable = _sessionSettings.Get(sessionID).GetString(SessionSettings.ODBC_LOG_OUTGOING_BACKUP_TABLE);
+
+            if (_sessionSettings.Get(sessionID).Has(SessionSettings.ODBC_LOG_EVENT_TABLE))
+                eventTable = _sessionSettings.Get(sessionID).GetString(SessionSettings.ODBC_LOG_EVENT_TABLE);
+
+            if (_sessionSettings.Get(sessionID).Has(SessionSettings.ODBC_LOG_EVENT_BACKUP_TABLE))
+                eventBackupTable = _sessionSettings.Get(sessionID).GetString(SessionSettings.ODBC_LOG_EVENT_BACKUP_TABLE);
 
             _connectionString = _sessionSettings.Get(sessionID).GetString(SessionSettings.ODBC_LOG_CONNECTION_STRING);
 

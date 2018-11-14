@@ -32,7 +32,7 @@ namespace QuickFix
             
             string connectionString = settings_.Get(sessionID).GetString(SessionSettings.ODBC_STORE_CONNECTION_STRING);
 
-            return new ODBCStore(sessionID, user, password, connectionString);
+            return new ODBCStore(sessionID, user, password, connectionString, settings_);
         }
     }
 }
