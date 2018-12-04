@@ -1,4 +1,6 @@
 ﻿
+using System;
+
 namespace QuickFix
 {
     /// <summary>
@@ -21,6 +23,9 @@ namespace QuickFix
             foreach (var log in logs_)
                 log.Clear();
         }
+
+        public void Backup(DateTime? DateThreshold = null)
+        { }
 
         public void OnIncoming(string msg)
         {

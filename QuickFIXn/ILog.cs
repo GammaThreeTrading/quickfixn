@@ -19,6 +19,11 @@ namespace QuickFix
         void Clear();
 
         /// <summary>
+        /// Backups the log (if possible) to backup destination.
+        /// </summary>
+        void Backup(DateTime? DateThreshold = null);
+
+        /// <summary>
         /// Logs an incoming message
         /// </summary>
         /// <param name="msg">a raw FIX message</param>

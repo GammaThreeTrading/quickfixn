@@ -91,6 +91,100 @@ namespace QuickFix
 
         }
 
+        public void Backup(DateTime? DateThreshold = null)
+        {
+            // Get a 10 Second window
+            DateTime bufferTime = DateTime.UtcNow - new TimeSpan(0, 0, 10);
+            if (DateThreshold != null)
+            {
+                bufferTime = DateThreshold.GetValueOrDefault(bufferTime);
+            }
+            //UtcTimeStamp time;
+            string sqlTime = ODBCHelper.DateTimeToODBCConverter(bufferTime);
+
+            string queryStringIncoming = string.Empty;
+            string queryStringOutgoing = string.Empty;
+            string queryStringEvent = string.Empty;
+            string whereClause = string.Empty;
+
+            queryStringIncoming = "INSERT INTO " + incomingBackupTable + " "
+            + "(time, beginstring, sendercompid, targetcompid, session_qualifier, text) "
+            + "select time, beginstring, sendercompid, targetcompid, session_qualifier, text ";
+
+            queryStringOutgoing = "INSERT INTO " + outgoingBackupTable + " "
+                + "(time, beginstring, sendercompid, targetcompid, session_qualifier, text) "
+                + "select time, beginstring, sendercompid, targetcompid, session_qualifier, text ";
+
+            queryStringEvent = "INSERT INTO " + eventBackupTable + " "
+                + "(time, beginstring, sendercompid, targetcompid, session_qualifier, text) "
+                + "select time, beginstring, sendercompid, targetcompid, session_qualifier, text ";
+
+
+            // Event Where Clause
+            string eventWhereClause = string.Empty;
+
+
+
+
+            eventWhereClause = " WHERE "
+                + "beginstring = '" + _sessionID.BeginString + "' "
+                + "AND sendercompid = '" + _sessionID.SenderCompID + "' "
+                + "AND targetcompid = '" + _sessionID.TargetCompID + "' "
+                + "AND time < '" + sqlTime + "' ";
+
+            if (!string.IsNullOrEmpty(_sessionID.SessionQualifier))
+                eventWhereClause = eventWhereClause + "AND session_qualifier = '" + _sessionID.SessionQualifier + "'";
+
+
+            //GammaThree - Backup messages into history, but ignore Heartbeats not associated with TestRequests:
+            whereClause = " WHERE "
+              + "beginstring = '" + _sessionID.BeginString + "' "
+              + "AND sendercompid = '" + _sessionID.SenderCompID + "' "
+              + "AND targetcompid = '" + _sessionID.TargetCompID + "' "
+              + "AND time < '" + sqlTime + "' ";
+
+            if (!string.IsNullOrEmpty(_sessionID.SessionQualifier))
+                whereClause = whereClause + "AND session_qualifier = '" + _sessionID.SessionQualifier + "'";
+
+
+            string incomingQuery = string.Empty;
+            string incomingClearQuery = string.Empty;
+
+            string outgoingQuery = string.Empty;
+            string outgoingClearQuery = string.Empty;
+
+            // Only query the non heartbeats.
+            incomingQuery = queryStringIncoming + "FROM " + incomingTable + whereClause + "AND NOT( text like  '%' + char(01) + '35=0' + char(01) + '%')";
+            incomingClearQuery = "delete " + incomingTable + " " + whereClause;
+
+            outgoingQuery = queryStringOutgoing + "FROM " + outgoingTable + whereClause + "AND NOT( text like  '%' + char(01) + '35=0' + char(01) + '%')";
+            outgoingClearQuery = "delete " + outgoingClearQuery + " " + whereClause;
+
+            OdbcConnection odbc = GetODBCConnection();
+            OdbcCommand cmdIncoming = new OdbcCommand(incomingQuery, odbc);
+            OdbcCommand cmdClearIncoming = new OdbcCommand(incomingClearQuery, odbc);
+            OdbcCommand cmdOutgoing = new OdbcCommand(outgoingQuery, odbc);
+            OdbcCommand cmdClearOutgoing = new OdbcCommand(outgoingClearQuery, odbc);
+            cmdIncoming.ExecuteNonQuery();
+            cmdClearIncoming.ExecuteNonQuery();
+
+            // To prevent duplicates, check to see if incoming table is the same as outgoing.
+            if (incomingTable != outgoingTable)
+            {
+                cmdOutgoing.ExecuteNonQuery();
+                cmdClearOutgoing.ExecuteNonQuery();
+            }
+
+            // Backup to Event Log
+            string logQuery = queryStringEvent + " from " + eventTable + " " + eventWhereClause;
+            string logClearQuery = "delete " + eventTable + " " + eventWhereClause;
+            OdbcCommand cmdEvent = new OdbcCommand(logQuery, odbc);
+            OdbcCommand cmdClearEvent = new OdbcCommand(logClearQuery, odbc);
+            cmdEvent.ExecuteNonQuery();
+            cmdClearEvent.ExecuteNonQuery();
+
+        }
+
         public void OnIncoming(string msg)
         {
             if (msg.Contains("'"))
