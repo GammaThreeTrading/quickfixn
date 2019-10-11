@@ -362,6 +362,25 @@ namespace UnitTests
         }
 
         [Test]
+        public void ExtractFieldTest()
+        {
+            string msgstr = "100=200\x01" + "300=400\x01" + "500=600\x01";
+            int n = 0;
+
+            var x = QuickFix.Message.ExtractField(msgstr, ref n);
+            Assert.AreEqual(8, n);
+            Assert.AreEqual("100=200", x.toStringField());
+
+            x = QuickFix.Message.ExtractField(msgstr, ref n);
+            Assert.AreEqual(16, n);
+            Assert.AreEqual("300=400", x.toStringField());
+
+            x = QuickFix.Message.ExtractField(msgstr, ref n);
+            Assert.AreEqual(24, n);
+            Assert.AreEqual("500=600", x.toStringField());
+        }
+
+        [Test]
         public void RepeatingGroup()
         {
             QuickFix.DataDictionary.DataDictionary dd = new QuickFix.DataDictionary.DataDictionary();
@@ -903,13 +922,27 @@ namespace UnitTests
             message.SetFields(new IField[] { allocAccount, allocAccountType, allocId });
 
             Assert.AreEqual(true, message.IsSetField(Tags.AllocID));
-            Assert.AreEqual("123456", message.GetField(Tags.AllocID));
+            Assert.AreEqual("123456", message.GetString(Tags.AllocID));
 
             Assert.AreEqual(true, message.IsSetField(Tags.AllocAccount));
-            Assert.AreEqual("QuickFixAccount", message.GetField(Tags.AllocAccount));
+            Assert.AreEqual("QuickFixAccount", message.GetString(Tags.AllocAccount));
 
             Assert.AreEqual(true, message.IsSetField(Tags.AllocAccountType));
             Assert.AreEqual(AllocAccountType.HOUSE_TRADER, message.GetInt(Tags.AllocAccountType));
+        }
+
+        [Test]
+        public void ChecksumIsLastFieldOfTrailer()
+        {
+            // issue 473
+            QuickFix.FIX42.News msg = new QuickFix.FIX42.News(new Headline("foobar"));
+            msg.LinesOfText = new LinesOfText(0);
+
+            msg.Trailer.SetField(new Signature("woot"));
+            msg.Trailer.SetField(new SignatureLength(4));
+
+            string foo = msg.ToString().Replace(Message.SOH, "|");
+            StringAssert.EndsWith("|10=099|", foo);
         }
     }
 }

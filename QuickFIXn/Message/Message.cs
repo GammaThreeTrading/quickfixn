@@ -1,6 +1,4 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Text;
 using QuickFix.Fields;
 using System.Text.RegularExpressions;
@@ -32,6 +30,8 @@ namespace QuickFix
 
     public class Trailer : FieldMap
     {
+        public int[] TRAILER_FIELD_ORDER = { Tags.SignatureLength, Tags.Signature, Tags.CheckSum };
+
         public Trailer()
             : base()
         { }
@@ -39,6 +39,16 @@ namespace QuickFix
         public Trailer(Trailer src)
             : base(src)
         { }
+
+        public override string CalculateString()
+        {
+            return base.CalculateString(new StringBuilder(), TRAILER_FIELD_ORDER);
+        }
+
+        public override string CalculateString(StringBuilder sb, int[] preFields)
+        {
+            return base.CalculateString(sb, TRAILER_FIELD_ORDER);
+        }
     }
 
     /// <summary>
@@ -49,7 +59,7 @@ namespace QuickFix
         public const string SOH = "\u0001";
         private int field_ = 0;
         private bool validStructure_;
-        
+
         #region Properties
 
         public Header Header { get; private set; }
@@ -123,10 +133,10 @@ namespace QuickFix
         {
             try
             {
-                int tagend = msgstr.IndexOf("=", pos);
+                int tagend = msgstr.IndexOf('=', pos);
                 int tag = Convert.ToInt32(msgstr.Substring(pos, tagend - pos));
                 pos = tagend + 1;
-                int fieldvalend = msgstr.IndexOf("\u0001", pos);
+                int fieldvalend = msgstr.IndexOf((char)1, pos);
                 StringField field =  new StringField(tag, msgstr.Substring(pos, fieldvalend - pos));
 
                 /*
@@ -253,7 +263,7 @@ namespace QuickFix
 
             try
             {
-                return fields.GetField(tag);
+                return fields.GetString(tag);
             }
             catch (FieldNotFoundException)
             {
@@ -565,11 +575,11 @@ namespace QuickFix
             {
                 int receivedBodyLength = this.Header.GetInt(Tags.BodyLength);
                 if (BodyLength() != receivedBodyLength)
-                    throw new InvalidMessage("Expected BodyLength=" + BodyLength() + ", Received BodyLength=" + receivedBodyLength);
+                    throw new InvalidMessage("Expected BodyLength=" + BodyLength() + ", Received BodyLength=" + receivedBodyLength + ", Message.SeqNum=" + this.Header.GetInt(Tags.MsgSeqNum));
 
                 int receivedCheckSum = this.Trailer.GetInt(Tags.CheckSum);
                 if (CheckSum() != receivedCheckSum)
-                    throw new InvalidMessage("Expected CheckSum=" + CheckSum() + ", Received CheckSum=" + receivedCheckSum);
+                    throw new InvalidMessage("Expected CheckSum=" + CheckSum() + ", Received CheckSum=" + receivedCheckSum + ", Message.SeqNum=" + this.Header.GetInt(Tags.MsgSeqNum));
             }
             catch (FieldNotFoundException e)
             {
@@ -594,7 +604,7 @@ namespace QuickFix
 
             if (header.IsSetField(Tags.BeginString))
             {
-                string beginString = header.GetField(Tags.BeginString);
+                string beginString = header.GetString(Tags.BeginString);
                 if (beginString.Length > 0)
                     this.Header.SetField(new BeginString(beginString));
 
@@ -605,14 +615,14 @@ namespace QuickFix
                 {
                     if (header.IsSetField(Tags.OnBehalfOfLocationID))
                     {
-                        string onBehalfOfLocationID = header.GetField(Tags.OnBehalfOfLocationID);
+                        string onBehalfOfLocationID = header.GetString(Tags.OnBehalfOfLocationID);
                         if (onBehalfOfLocationID.Length > 0)
                             this.Header.SetField(new DeliverToLocationID(onBehalfOfLocationID));
                     }
 
                     if (header.IsSetField(Tags.DeliverToLocationID))
                     {
-                        string deliverToLocationID = header.GetField(Tags.DeliverToLocationID);
+                        string deliverToLocationID = header.GetString(Tags.DeliverToLocationID);
                         if (deliverToLocationID.Length > 0)
                             this.Header.SetField(new OnBehalfOfLocationID(deliverToLocationID));
                     }
@@ -675,28 +685,28 @@ namespace QuickFix
 
             if(header.IsSetField(Tags.OnBehalfOfCompID))
             {
-                string onBehalfOfCompID = header.GetField(Tags.OnBehalfOfCompID);
+                string onBehalfOfCompID = header.GetString(Tags.OnBehalfOfCompID);
                 if(onBehalfOfCompID.Length > 0)
                     this.Header.SetField(new DeliverToCompID(onBehalfOfCompID));
             }
 
             if(header.IsSetField(Tags.OnBehalfOfSubID))
             {
-                string onBehalfOfSubID = header.GetField(  Tags.OnBehalfOfSubID);
+                string onBehalfOfSubID = header.GetString(  Tags.OnBehalfOfSubID);
                 if(onBehalfOfSubID.Length > 0)
                     this.Header.SetField(new DeliverToSubID(onBehalfOfSubID));
             }
 
             if(header.IsSetField(Tags.DeliverToCompID))
             {
-                string deliverToCompID = header.GetField(Tags.DeliverToCompID);
+                string deliverToCompID = header.GetString(Tags.DeliverToCompID);
                 if(deliverToCompID.Length > 0)
                     this.Header.SetField(new OnBehalfOfCompID(deliverToCompID));
             }
 
             if(header.IsSetField(Tags.DeliverToSubID))
             {
-                string deliverToSubID = header.GetField(Tags.DeliverToSubID);
+                string deliverToSubID = header.GetString(Tags.DeliverToSubID);
                 if(deliverToSubID.Length > 0)
                     this.Header.SetField(new OnBehalfOfSubID(deliverToSubID));
             }
@@ -712,12 +722,12 @@ namespace QuickFix
 
         public bool IsAdmin()
         {
-            return this.Header.IsSetField(Tags.MsgType) && IsAdminMsgType(this.Header.GetField(Tags.MsgType));
+            return this.Header.IsSetField(Tags.MsgType) && IsAdminMsgType(this.Header.GetString(Tags.MsgType));
         }
 
         public bool IsApp()
         {
-            return this.Header.IsSetField(Tags.MsgType) && !IsAdminMsgType(this.Header.GetField(Tags.MsgType));
+            return this.Header.IsSetField(Tags.MsgType) && !IsAdminMsgType(this.Header.GetString(Tags.MsgType));
         }
 
         /// <summary>
@@ -747,18 +757,18 @@ namespace QuickFix
             bool targetLocationIDSet = m.Header.IsSetField(Tags.TargetLocationID);
 
             if (senderSubIDSet && senderLocationIDSet && targetSubIDSet && targetLocationIDSet)
-                return new SessionID(m.Header.GetField(Tags.BeginString),
-                    m.Header.GetField(Tags.SenderCompID), m.Header.GetField(Tags.SenderSubID), m.Header.GetField(Tags.SenderLocationID),
-                    m.Header.GetField(Tags.TargetCompID), m.Header.GetField(Tags.TargetSubID), m.Header.GetField(Tags.TargetLocationID));
+                return new SessionID(m.Header.GetString(Tags.BeginString),
+                    m.Header.GetString(Tags.SenderCompID), m.Header.GetString(Tags.SenderSubID), m.Header.GetString(Tags.SenderLocationID),
+                    m.Header.GetString(Tags.TargetCompID), m.Header.GetString(Tags.TargetSubID), m.Header.GetString(Tags.TargetLocationID));
             else if (senderSubIDSet && targetSubIDSet)
-                return new SessionID(m.Header.GetField(Tags.BeginString),
-                    m.Header.GetField(Tags.SenderCompID), m.Header.GetField(Tags.SenderSubID),
-                    m.Header.GetField(Tags.TargetCompID), m.Header.GetField(Tags.TargetSubID));
+                return new SessionID(m.Header.GetString(Tags.BeginString),
+                    m.Header.GetString(Tags.SenderCompID), m.Header.GetString(Tags.SenderSubID),
+                    m.Header.GetString(Tags.TargetCompID), m.Header.GetString(Tags.TargetSubID));
             else
                 return new SessionID(
-                    m.Header.GetField(Tags.BeginString),
-                    m.Header.GetField(Tags.SenderCompID),
-                    m.Header.GetField(Tags.TargetCompID));
+                    m.Header.GetString(Tags.BeginString),
+                    m.Header.GetString(Tags.SenderCompID),
+                    m.Header.GetString(Tags.TargetCompID));
         }
 
         public override void Clear()

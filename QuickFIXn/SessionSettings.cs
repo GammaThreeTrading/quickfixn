@@ -81,7 +81,6 @@ namespace QuickFix
         public const string ODBC_STORE_SESSION_TABLE = "OdbcStoreSessionTable";
         public const string ODBC_STORE_MESSAGES_TABLE = "OdbcStoreMessagesTable";
 
-
         public const string SSL_ENABLE = "SSLEnable";
         public const string SSL_SERVERNAME = "SSLServerName";
         public const string SSL_PROTOCOLS = "SSLProtocols";
