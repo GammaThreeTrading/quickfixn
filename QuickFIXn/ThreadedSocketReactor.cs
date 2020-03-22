@@ -36,6 +36,7 @@ namespace QuickFix
         private SocketSettings socketSettings_;
         private QuickFix.Dictionary sessionDict_;
         private IPEndPoint serverSocketEndPoint_;
+        private readonly AcceptorSocketDescriptor acceptorDescriptor_;
 
         #endregion
 
@@ -43,13 +44,19 @@ namespace QuickFix
         public ThreadedSocketReactor(IPEndPoint serverSocketEndPoint, SocketSettings socketSettings)
             : this(serverSocketEndPoint, socketSettings, null)
         { }
-        
-        public ThreadedSocketReactor(IPEndPoint serverSocketEndPoint, SocketSettings socketSettings, QuickFix.Dictionary sessionDict)
+
+        public ThreadedSocketReactor(IPEndPoint serverSocketEndPoint, SocketSettings socketSettings,
+            QuickFix.Dictionary sessionDict) : this(serverSocketEndPoint, socketSettings, sessionDict, null)
+        {
+            
+        }
+        internal ThreadedSocketReactor(IPEndPoint serverSocketEndPoint, SocketSettings socketSettings, QuickFix.Dictionary sessionDict, AcceptorSocketDescriptor acceptorDescriptor)
         {
             socketSettings_ = socketSettings;
             serverSocketEndPoint_ = serverSocketEndPoint;
             tcpListener_ = new TcpListener(serverSocketEndPoint_);
             sessionDict_ = sessionDict;
+            acceptorDescriptor_ = acceptorDescriptor;
         }
 
         public void Start()
@@ -108,7 +115,7 @@ namespace QuickFix
                     {
                         ApplySocketOptions(client, socketSettings_);
                         ClientHandlerThread t =
-                            new ClientHandlerThread(client, nextClientId_++, sessionDict_, socketSettings_);
+                            new ClientHandlerThread(client, nextClientId_++, sessionDict_, socketSettings_, acceptorDescriptor_);
                         t.Exited += OnClientHandlerThreadExited;
                         lock (sync_)
                         {
@@ -150,7 +157,7 @@ namespace QuickFix
         }
 
         /// <summary>
-        /// FIXME get socket options from SessionSettings
+        /// Apply socket options from settings
         /// </summary>
         /// <param name="client"></param>
         /// <param name="socketSettings"></param>
@@ -165,6 +172,14 @@ namespace QuickFix
             if (socketSettings.SocketSendBufferSize.HasValue)
             {
                 client.SendBufferSize = socketSettings.SocketSendBufferSize.Value;
+            }
+            if (socketSettings.SocketReceiveTimeout.HasValue)
+            {
+                client.ReceiveTimeout = socketSettings.SocketReceiveTimeout.Value;
+            }
+            if (socketSettings.SocketSendTimeout.HasValue)
+            {
+                client.SendTimeout = socketSettings.SocketSendTimeout.Value;
             }
         }
 

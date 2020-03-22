@@ -9,6 +9,20 @@ What's New
 ----------
 
 ### NEXT VERSION:
+* (patch) #505 - Fix ObjectDisposedException when SocketInitiator is stopped before connection attempt fails (musashibg)
+* (patch) #571 - StreamFactory fix: unexpected null from GetProxy (mkoca & mcmillab)
+* (patch) #547 - Implement Refresh() method in FileStore (roederja2)
+* (minor) #570 - change Parser.AddToStream() interface to not use 'ref' (roederja2)
+* (patch) #526 - Do not ignore MsgSeqNum on ResendRequest when no persistence (ledusskapis)
+* (patch) #430 - Support config AllowUnknownMsgFields (peto268/gbirchmeier)
+* (patch) #349 - Improvement to repeating-group error detection when delimiter is missing (gbirchmeier)
+* (minor) #561 - Fix nanosecond config throw (dckorben)
+* (minor) #512 - Support config SocketSendTimeout/SocketReceiveTimeout to prevent SSL socket timeouts (allysutherland)
+* (patch) #383/#582 - Fix debug logfile name clash (chizz5056/gbirchmeier)
+* (patch) #410/#583 - SocketAcceptPort now fully-obeyed (mvdtom)
+* (minor) #585/#323 - Add Message.ToXML() (baffles/gbirchmeier)
+
+### v1.9.0:
 * (minor) #469 - Add support for NET Standard 2.0 (jhickson)
 * (minor) #476 - Separate FIX message assemblies from the main project (akamyshanov)
 * (minor) #482 - x64 support (brobits)
@@ -31,6 +45,7 @@ What's New
 * (patch) #478 - eliminate unnecessary string/byte flip-flop (gbirchmeier)
 * (patch) #473 - correct ordering of fields in message trailer (Ieshaj/gbirchmeier)
 * (patch) #513 - Allow groups where the first entry is a group (twoi/gbirchmeier)
+* (minor) #549 - SessionFactory.Create creates a more-appropriate DefaultMessageFactory; also add NullLogFactory (gbirchmeier)
 
 ### v1.8.0:
 * (patch) #402 - Multithreading fix to please NUnit 2.6.3 and above (arkadiuszwojcik)
