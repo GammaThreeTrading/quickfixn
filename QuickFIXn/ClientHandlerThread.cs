@@ -54,24 +54,26 @@ namespace QuickFix
         /// <param name="settingsDict"></param>
         /// <param name="socketSettings"></param>
         public ClientHandlerThread(TcpClient tcpClient, long clientId, QuickFix.Dictionary settingsDict, SocketSettings socketSettings)
+            : this(tcpClient, clientId, settingsDict, socketSettings, null)
         {
-            string debugLogFilePath = "";
+            
+        }
+
+        internal ClientHandlerThread(TcpClient tcpClient, long clientId, QuickFix.Dictionary settingsDict,
+            SocketSettings socketSettings, AcceptorSocketDescriptor acceptorDescriptor)
+        {
+            string debugLogFilePath = "log";
             if (settingsDict.Has(SessionSettings.DEBUG_FILE_LOG_PATH))
-            {
                 debugLogFilePath = settingsDict.GetString(SessionSettings.DEBUG_FILE_LOG_PATH);
-                // FIXME - do something more flexible than hardcoding a filelog
-                log_ = new FileLog(debugLogFilePath, new SessionID("ClientHandlerThread", clientId.ToString(), "Debug"));
-            }
-                
             else if (settingsDict.Has(SessionSettings.FILE_LOG_PATH))
-            {
                 debugLogFilePath = settingsDict.GetString(SessionSettings.FILE_LOG_PATH);
-                // FIXME - do something more flexible than hardcoding a filelog
-                log_ = new FileLog(debugLogFilePath, new SessionID("ClientHandlerThread", clientId.ToString(), "Debug"));
-            }
+
+            // FIXME - do something more flexible than hardcoding a filelog
+            log_ = new FileLog(debugLogFilePath, new SessionID(
+                    "ClientHandlerThread", clientId.ToString(), "Debug-" + Guid.NewGuid().ToString()));
 
             this.Id = clientId;
-            socketReader_ = new SocketReader(tcpClient, socketSettings, this);
+            socketReader_ = new SocketReader(tcpClient, socketSettings, this, acceptorDescriptor);
         }
 
         public void Start()
@@ -122,11 +124,7 @@ namespace QuickFix
         /// FIXME do real logging
         public void Log(string s)
         {
-            if(log_ != null)
-            {
-                log_.OnEvent(s);
-            }
-            
+            log_.OnEvent(s);
         }
 
         /// <summary>

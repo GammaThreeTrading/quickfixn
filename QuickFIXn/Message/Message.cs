@@ -2,6 +2,7 @@
 using System.Text;
 using QuickFix.Fields;
 using System.Text.RegularExpressions;
+using System.Collections.Generic;
 
 namespace QuickFix
 {
@@ -59,6 +60,7 @@ namespace QuickFix
         public const string SOH = "\u0001";
         private int field_ = 0;
         private bool validStructure_;
+        protected DataDictionary.DataDictionary dataDictionary_ = null;
 
         #region Properties
 
@@ -498,16 +500,16 @@ namespace QuickFix
         /// <param name="msgstr">full message string</param>
         /// <param name="pos">starting character position of group</param>
         /// <param name="fieldMap">full message as FieldMap</param>
-        /// <param name="dd">group definition structure from dd</param>
+        /// <param name="groupDD">group definition structure from dd</param>
         /// <param name="sessionDataDictionary"></param>
         /// <param name="appDD"></param>
         /// <param name="msgFactory">if null, then this method will use the generic Group class constructor</param>
         /// <returns></returns>
         protected int SetGroup(
-            StringField grpNoFld, string msgstr, int pos, FieldMap fieldMap, DataDictionary.IGroupSpec dd,
+            StringField grpNoFld, string msgstr, int pos, FieldMap fieldMap, DataDictionary.IGroupSpec groupDD,
             DataDictionary.DataDictionary sessionDataDictionary, DataDictionary.DataDictionary appDD, IMessageFactory msgFactory)
         {
-            int grpEntryDelimiterTag = dd.Delim;
+            int grpEntryDelimiterTag = groupDD.Delim;
             int grpPos = pos;
             Group grp = null; // the group entry being constructed
 
@@ -534,15 +536,20 @@ namespace QuickFix
                     if (grp == null)
                         grp = new Group(grpNoFld.Tag, grpEntryDelimiterTag);
                 }
-                else if (!dd.IsField(f.Tag))
+                else if (!groupDD.IsField(f.Tag))
                 {
                     // This field is not in the group, thus the repeating group is done.
-
                     if (grp != null)
                     {
                         fieldMap.AddGroup(grp, false);
                     }
                     return grpPos;
+                }
+                else if(groupDD.IsField(f.Tag) && grp != null && grp.IsSetField(f.Tag))
+                {
+                    // Tag is appearing for the second time within a group element.
+                    // Presumably the sender didn't set the delimiter (or their DD has a different delimiter).
+                    throw new RepeatedTagWithoutGroupDelimiterTagException(grpNoFld.Tag, f.Tag);
                 }
 
                 if (grp == null)
@@ -553,10 +560,10 @@ namespace QuickFix
 
                 // f is just a field in our group entry.  Add it and iterate again.
                 grp.SetField(f);
-                if(dd.IsGroup(f.Tag))
+                if(groupDD.IsGroup(f.Tag))
                 {
                     // f is a counter for a nested group.  Recurse!
-                    pos = SetGroup(f, msgstr, pos, grp, dd.GetGroupSpec(f.Tag), sessionDataDictionary, appDD, msgFactory);
+                    pos = SetGroup(f, msgstr, pos, grp, groupDD.GetGroupSpec(f.Tag), sessionDataDictionary, appDD, msgFactory);
                 }
             }
             
@@ -794,6 +801,60 @@ namespace QuickFix
         protected int BodyLength()
         {
             return this.Header.CalculateLength() + CalculateLength() + this.Trailer.CalculateLength();
+        }
+
+        private static string FieldMapToXML(DataDictionary.DataDictionary dd, FieldMap fields, int space)
+        {
+            StringBuilder s = new StringBuilder();
+            string name = string.Empty;
+
+            // fields
+            foreach (var f in fields)
+            {
+               s.Append("<field ");
+               if ((dd != null) && ( dd.FieldsByTag.ContainsKey(f.Key)))
+               {
+                   s.Append("name=\"" + dd.FieldsByTag[f.Key].Name + "\" ");
+               }
+               s.Append("number=\"" + f.Key.ToString() + "\">");
+               s.Append("<![CDATA[" + f.Value.ToString() + "]]>");
+               s.Append("</field>");
+            }
+            // now groups
+            List<int> groupTags = fields.GetGroupTags();
+            foreach (int groupTag in groupTags)
+            {
+                for (int counter = 1; counter <= fields.GroupCount(groupTag); counter++)
+                {
+                    s.Append("<group>");
+                    s.Append(FieldMapToXML(dd, fields.GetGroup(counter, groupTag), space+1));
+                    s.Append("</group>");
+                }
+            }
+
+            return s.ToString();
+        }
+
+        /// <summary>
+        /// Get a representation of the message as an XML string.
+        /// (NOTE: this is just an ad-hoc XML; it is NOT FIXML.)
+        /// </summary>
+        /// <returns>an XML string</returns>
+        public string ToXML()
+        {
+            StringBuilder s = new StringBuilder();
+            s.AppendLine("<message>");
+            s.AppendLine("<header>");
+            s.AppendLine(FieldMapToXML(dataDictionary_, Header, 4));
+            s.AppendLine("</header>");
+            s.AppendLine("<body>");
+            s.AppendLine(FieldMapToXML(dataDictionary_, this, 4));
+            s.AppendLine("</body>");
+            s.AppendLine("<trailer>");
+            s.AppendLine(FieldMapToXML(dataDictionary_, Trailer, 4));
+            s.AppendLine("</trailer>");
+            s.AppendLine("</message>");
+            return s.ToString();
         }
     }
 }
