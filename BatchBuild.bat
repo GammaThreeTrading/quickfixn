@@ -30,7 +30,7 @@ copy Messages\FIX50SP2\bin\Release\net452\QuickFix.FIX50SP2.pdb bin\Release
 
 mkdir bin\ReleaseCore20
 copy QuickFIXN\Bin\Release\netstandard2.0\*.dll bin\ReleaseCore20
-copy QuickFIXN\Bin\Release\netstandard2.0\*.pdb bin\ReleaseCore
+copy QuickFIXN\Bin\Release\netstandard2.0\*.pdb bin\ReleaseCore20
 
 
 copy Messages\FIX40\bin\Release\netstandard2.0\QuickFix.FIX40.dll bin\ReleaseCore20
@@ -55,7 +55,7 @@ copy Messages\FIX50SP1\bin\Release\netstandard2.0\QuickFix.FIX50SP1.dll bin\Rele
 copy Messages\FIX50SP1\bin\Release\netstandard2.0\QuickFix.FIX50SP1.pdb bin\ReleaseCore20
 
 copy Messages\FIX50SP2\bin\Release\netstandard2.0\QuickFix.FIX50SP2.dll bin\ReleaseCore20
-copy Messages\FIX50SP2\bin\Release\netstandard2.0\QuickFix.FIX50SP2.pdb bin\ReleaseCore02
+copy Messages\FIX50SP2\bin\Release\netstandard2.0\QuickFix.FIX50SP2.pdb bin\ReleaseCore20
 
 
 
