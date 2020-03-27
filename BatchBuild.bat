@@ -28,34 +28,34 @@ copy Messages\FIX50SP2\bin\Release\net452\QuickFix.FIX50SP2.dll bin\Release
 copy Messages\FIX50SP2\bin\Release\net452\QuickFix.FIX50SP2.pdb bin\Release
 
 
-mkdir bin\ReleaseCore20
-copy QuickFIXN\Bin\Release\netstandard2.0\*.dll bin\ReleaseCore20
-copy QuickFIXN\Bin\Release\netstandard2.0\*.pdb bin\ReleaseCore20
+mkdir bin\ReleaseCore21
+copy QuickFIXN\Bin\Release\netstandard2.1\*.dll bin\ReleaseCore21
+copy QuickFIXN\Bin\Release\netstandard2.1\*.pdb bin\ReleaseCore21
 
 
-copy Messages\FIX40\bin\Release\netstandard2.0\QuickFix.FIX40.dll bin\ReleaseCore20
-copy Messages\FIX40\bin\Release\netstandard2.0\QuickFix.FIX40.pdb bin\ReleaseCore20
+copy Messages\FIX40\bin\Release\netstandard2.1\QuickFix.FIX40.dll bin\ReleaseCore21
+copy Messages\FIX40\bin\Release\netstandard2.1\QuickFix.FIX40.pdb bin\ReleaseCore21
 
-copy Messages\FIX41\bin\Release\netstandard2.0\QuickFix.FIX41.dll bin\ReleaseCore20
-copy Messages\FIX41\bin\Release\netstandard2.0\QuickFix.FIX41.pdb bin\ReleaseCore20
+copy Messages\FIX41\bin\Release\netstandard2.1\QuickFix.FIX41.dll bin\ReleaseCore21
+copy Messages\FIX41\bin\Release\netstandard2.1\QuickFix.FIX41.pdb bin\ReleaseCore21
 
-copy Messages\FIX42\bin\Release\netstandard2.0\QuickFix.FIX42.dll bin\ReleaseCore20
-copy Messages\FIX42\bin\Release\netstandard2.0\QuickFix.FIX42.pdb bin\ReleaseCore20
+copy Messages\FIX42\bin\Release\netstandard2.1\QuickFix.FIX42.dll bin\ReleaseCore21
+copy Messages\FIX42\bin\Release\netstandard2.1\QuickFix.FIX42.pdb bin\ReleaseCore21
 
-copy Messages\FIX43\bin\Release\netstandard2.0\QuickFix.FIX43.dll bin\ReleaseCore20
-copy Messages\FIX43\bin\Release\netstandard2.0\QuickFix.FIX43.pdb bin\ReleaseCore20
+copy Messages\FIX43\bin\Release\netstandard2.1\QuickFix.FIX43.dll bin\ReleaseCore21
+copy Messages\FIX43\bin\Release\netstandard2.1\QuickFix.FIX43.pdb bin\ReleaseCore21
 
-copy Messages\FIX44\bin\Release\netstandard2.0\QuickFix.FIX44.dll bin\ReleaseCore20
-copy Messages\FIX44\bin\Release\netstandard2.0\QuickFix.FIX44.pdb bin\ReleaseCore20
+copy Messages\FIX44\bin\Release\netstandard2.1\QuickFix.FIX44.dll bin\ReleaseCore21
+copy Messages\FIX44\bin\Release\netstandard2.1\QuickFix.FIX44.pdb bin\ReleaseCore21
 
-copy Messages\FIX50\bin\Release\netstandard2.0\QuickFix.FIX50.dll bin\ReleaseCore20
-copy Messages\FIX50\bin\Release\netstandard2.0\QuickFix.FIX50.pdb bin\ReleaseCore20
+copy Messages\FIX50\bin\Release\netstandard2.1\QuickFix.FIX50.dll bin\ReleaseCore21
+copy Messages\FIX50\bin\Release\netstandard2.1\QuickFix.FIX50.pdb bin\ReleaseCore21
 
-copy Messages\FIX50SP1\bin\Release\netstandard2.0\QuickFix.FIX50SP1.dll bin\ReleaseCore20
-copy Messages\FIX50SP1\bin\Release\netstandard2.0\QuickFix.FIX50SP1.pdb bin\ReleaseCore20
+copy Messages\FIX50SP1\bin\Release\netstandard2.1\QuickFix.FIX50SP1.dll bin\ReleaseCore21
+copy Messages\FIX50SP1\bin\Release\netstandard2.1\QuickFix.FIX50SP1.pdb bin\ReleaseCore21
 
-copy Messages\FIX50SP2\bin\Release\netstandard2.0\QuickFix.FIX50SP2.dll bin\ReleaseCore20
-copy Messages\FIX50SP2\bin\Release\netstandard2.0\QuickFix.FIX50SP2.pdb bin\ReleaseCore20
+copy Messages\FIX50SP2\bin\Release\netstandard2.1\QuickFix.FIX50SP2.dll bin\ReleaseCore21
+copy Messages\FIX50SP2\bin\Release\netstandard2.1\QuickFix.FIX50SP2.pdb bin\ReleaseCore21
 
 
 
