@@ -1,15 +1,21 @@
 version: 1.0.{build}
 
 install:
-- cmd: >-
-    gem install --source http://rubygems.org nokogiri -v 1.6.8.1
+- dir C:\
+- set PATH=C:\Ruby26-x64\bin;%PATH%
+- ruby -v
+- ps: |
+    ruby -v
+    gem install nokogiri
+    ruby generator\generate.rb
 
-    generate.bat
+before_test:
+- ruby -v
+
 build_script:
-- cmd: build.bat
+- ps: dotnet build -c Release
 
 test_script:
-- cmd: >-
-    unit_test.bat
-
-    appveyor_test.bat
+- ps: |
+    dotnet test -c Release --no-build --no-restore UnitTests -l trx
+    .\acceptance_test.ps1

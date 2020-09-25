@@ -282,10 +282,19 @@ namespace QuickFix.DataDictionary
                 Type type;
                 if (!TryGetFieldType(field.Tag, out type))
                     return;
-
                 if (type == typeof(StringField))
                     return;
-                else if (type == typeof(CharField))
+
+                if (false == CheckFieldsHaveValues && field.ToString().Length < 1)
+                {
+                    // If ValidateFieldsHaveValues=N, don't check empty non-string fields
+                    // because engine should not decide how to convert empty to e.g. float or datetime.
+                    // (User code may see IncorrectDataFormat exceptions
+                    //  when attempting to extract fields in not-string formats.)
+                    return;
+                }
+
+                if (type == typeof(CharField))
                     Fields.Converters.CharConverter.Convert(field.ToString());
                 else if (type == typeof(IntField))
                     Fields.Converters.IntConverter.Convert(field.ToString());
@@ -336,24 +345,27 @@ namespace QuickFix.DataDictionary
         }
 
         /// <summary>
-        /// If field is an enum, make sure the value is valid.
+        /// If field is an enum or multiple value field, make sure the value(s) is/are valid.
+        /// (If field is unknown, ignore it.  It's not this function's job to test that.)
         /// </summary>
         /// <param name="field"></param>
         public void CheckValue(Fields.IField field)
         {
-            DDField fld = FieldsByTag[field.Tag];
-            if (fld.HasEnums())
+            if (FieldsByTag.TryGetValue(field.Tag, out var fld))
             {
-                if (fld.IsMultipleValueFieldWithEnums)
+                if (fld.HasEnums())
                 {
-                    string[] splitted = field.ToString().Split(' ');
+                    if (fld.IsMultipleValueFieldWithEnums)
+                    {
+                        string[] splitted = field.ToString().Split(' ');
 
-                    foreach (string value in splitted)
-                        if (!fld.EnumDict.ContainsKey(value))
-                            throw new IncorrectTagValue(field.Tag);
+                        foreach (string value in splitted)
+                            if (!fld.EnumDict.ContainsKey(value))
+                                throw new IncorrectTagValue(field.Tag);
+                    }
+                    else if (!fld.EnumDict.ContainsKey(field.ToString()))
+                        throw new IncorrectTagValue(field.Tag);
                 }
-                else if (!fld.EnumDict.ContainsKey(field.ToString()))
-                    throw new IncorrectTagValue(field.Tag);
             }
         }
 
@@ -533,7 +545,26 @@ namespace QuickFix.DataDictionary
         }
 
         /// <summary>
-        /// Implied null third componentRequired parameter
+        /// Checks that node has 'name' attribute, and is not a stray text node.
+        /// Throws a DictionaryParseException if a field or component node is malformed.
+        /// </summary>
+        /// <param name="childNode"></param>
+        /// <param name="parentNode"></param>
+        internal static void VerifyChildNode(XmlNode childNode, XmlNode parentNode)
+        {
+            if (childNode.Attributes == null)
+            {
+                throw new DictionaryParseException($"Malformed data dictionary: Found text-only node containing '{childNode.InnerText.Trim()}'");
+            }
+            if (childNode.Attributes["name"] == null)
+            {
+                string messageTypeName = (parentNode.Attributes["name"] != null) ? parentNode.Attributes["name"].Value : parentNode.Name;
+                throw new DictionaryParseException($"Malformed data dictionary: Found '{childNode.Name}' node without 'name' within parent '{parentNode.Name}/{messageTypeName}'");
+            }
+        }
+
+        /// <summary>
+        /// Parse a message element.  Its data is added to parameter `ddmap`.
         /// </summary>
         /// <param name="node"></param>
         /// <param name="ddmap"></param>
@@ -543,10 +574,10 @@ namespace QuickFix.DataDictionary
         }
 
         /// <summary>
-        /// Parse a message element
+        /// Parse a message element.  Its data is added to parameter `ddmap`.
         /// </summary>
-        /// <param name="node"></param>
-        /// <param name="ddmap"></param>
+        /// <param name="node">a message, group, or component node</param>
+        /// <param name="ddmap">the still-being-constructed DDMap for this node</param>
         /// <param name="componentRequired">
         /// If non-null, parsing is inside a component that is required (true) or not (false).
         /// If null, parser is not inside a component.
@@ -574,65 +605,52 @@ namespace QuickFix.DataDictionary
                 Console.WriteLine(s);
                 */
 
-                var fieldName = (childNode.Attributes["name"] != null) ? childNode.Attributes["name"].Value : "no-name";
+                VerifyChildNode(childNode, node);
 
-                if (childNode.Name == "field")
+                var nameAttribute = childNode.Attributes["name"].Value;
+
+                switch (childNode.Name)
                 {
-                    if (FieldsByName.ContainsKey(fieldName) == false)
-                    {
-                        throw new Exception(
-                            $"Field '{fieldName}' is used in '{messageTypeName}', but is not defined in <fields> set.");
-                    }
+                    case "field":
+                    case "group":
+                        if (FieldsByName.ContainsKey(nameAttribute) == false)
+                        {
+                            throw new DictionaryParseException(
+                                $"Field '{nameAttribute}' is not defined in <fields> section.");
+                        }
+                        DDField fld = FieldsByName[nameAttribute];
 
-                    DDField fld = FieldsByName[fieldName];
-                    XmlAttribute req = childNode.Attributes["required"];
-                    if (req != null && req.Value == "Y"
-                        && (componentRequired == null || componentRequired.Value == true))
-                    {
-                        ddmap.ReqFields.Add(fld.Tag);
-                    }
-                    if (!ddmap.IsField(fld.Tag))
-                    {
-                        ddmap.Fields.Add(fld.Tag, fld);
-                    }
+                        bool required = (childNode.Attributes["required"]?.Value == "Y") && componentRequired.GetValueOrDefault(true);
 
-                    // if first field in group, make it the DELIM
-                    if ((ddmap.GetType() == typeof(DDGrp) && ((DDGrp)ddmap).Delim == 0))
-                    {
-                        ((DDGrp)ddmap).Delim = fld.Tag;
-                    }
-                }
-                else if (childNode.Name == "group")
-                {
-                    DDField fld = FieldsByName[fieldName];
-                    DDGrp grp = new DDGrp();
-                    XmlAttribute req = childNode.Attributes["required"];
-                    if (req != null && req.Value == "Y"
-                        && (componentRequired == null || componentRequired.Value == true))
-                    {
-                        ddmap.ReqFields.Add(fld.Tag);
-                        grp.Required = true;
-                    }
-                    if (!ddmap.IsField(fld.Tag))
-                    {
-                        ddmap.Fields.Add(fld.Tag, fld);
-                    }
-                    grp.NumFld = fld.Tag;
-                    ParseMsgEl(childNode, grp);
-                    ddmap.Groups.Add(fld.Tag, grp);
+                        if (required)
+                            ddmap.ReqFields.Add(fld.Tag);
 
-                    // if first field in group, make it the DELIM
-                    if ((ddmap.GetType() == typeof(DDGrp) && ((DDGrp)ddmap).Delim == 0))
-                    {
-                        ((DDGrp)ddmap).Delim = fld.Tag;
-                    }
-                }
-                else if (childNode.Name == "component")
-                {
-                    XmlNode compNode = RootDoc.SelectSingleNode("//components/component[@name='" + fieldName + "']");
-                    XmlAttribute req = childNode.Attributes["required"];
-                    bool? compRequired = (req != null && req.Value == "Y");
-                    ParseMsgEl(compNode, ddmap, compRequired);
+                        if (ddmap.IsField(fld.Tag) == false)
+                            ddmap.Fields.Add(fld.Tag, fld);
+
+                        // if this is in a group whose delim is unset, then this must be the delim (i.e. first field)
+                        if (ddmap is DDGrp ddGroup && ddGroup.Delim == 0)
+                            ddGroup.Delim = fld.Tag;
+
+                        if (childNode.Name == "group")
+                        {
+                            DDGrp grp = new DDGrp();
+                            grp.NumFld = fld.Tag;
+                            if (required)
+                                grp.Required = true;
+
+                            ParseMsgEl(childNode, grp);
+                            ddmap.Groups.Add(fld.Tag, grp);
+                        }
+                        break;
+
+                    case "component":
+                        XmlNode compNode = RootDoc.SelectSingleNode("//components/component[@name='" + nameAttribute + "']");
+                        ParseMsgEl(compNode, ddmap, (childNode.Attributes["required"]?.Value == "Y"));
+                        break;
+
+                    default:
+                        throw new DictionaryParseException($"Malformed data dictionary: child node type should be one of {{field,group,component}} but is '{childNode.Name}' within parent '{node.Name}/{messageTypeName}'");
                 }
             }
         }
