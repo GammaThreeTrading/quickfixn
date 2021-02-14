@@ -234,7 +234,7 @@ namespace QuickFix
         public static bool NeedTestRequest(DateTime now, int heartBtIntMillis, DateTime lastReceivedTime, int testRequestCounter)
         {
             double elapsedMilliseconds = now.Subtract(lastReceivedTime).TotalMilliseconds;
-            return elapsedMilliseconds >= (1.2 * ((testRequestCounter + 1) * heartBtIntMillis));
+            return elapsedMilliseconds >= (2 * ((testRequestCounter + 1) * heartBtIntMillis));
         }
         public bool NeedTestRequest()
         {
