@@ -65,8 +65,8 @@ namespace QuickFix
             string debugLogFilePath = "";
             if (settingsDict.Has(SessionSettings.DEBUG_FILE_LOG_PATH))
                 debugLogFilePath = settingsDict.GetString(SessionSettings.DEBUG_FILE_LOG_PATH);
-            else if (settingsDict.Has(SessionSettings.FILE_LOG_PATH))
-                debugLogFilePath = settingsDict.GetString(SessionSettings.FILE_LOG_PATH);
+            //else if (settingsDict.Has(SessionSettings.FILE_LOG_PATH))
+            //    debugLogFilePath = settingsDict.GetString(SessionSettings.FILE_LOG_PATH);
 
             // FIXME - do something more flexible than hardcoding a filelog
             if(!string.IsNullOrEmpty(debugLogFilePath))
