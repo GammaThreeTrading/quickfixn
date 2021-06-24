@@ -36,6 +36,7 @@ namespace QuickFix
         public const string SOCKET_CONNECT_PORT = "SocketConnectPort";
         public const string RECONNECT_INTERVAL = "ReconnectInterval";
         public const string FILE_LOG_PATH = "FileLogPath";
+        public const string HYBRID_FILE_LOG_PATH = "HybridFileLogPath";
         public const string DEBUG_FILE_LOG_PATH = "DebugFileLogPath";
         public const string FILE_STORE_PATH = "FileStorePath";
         public const string REFRESH_ON_LOGON = "RefreshOnLogon";
