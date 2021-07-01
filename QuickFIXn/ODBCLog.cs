@@ -23,17 +23,17 @@ namespace QuickFix
         private string _user = string.Empty;
         private string _pwd = string.Empty;
         private SessionSettings _sessionSettings;
-        
+
 
         public ODBCLog(SessionSettings settings, SessionID sessionID)
         {
             _sessionID = sessionID;
             _sessionSettings = settings;
 
-            if( _sessionSettings.Get(sessionID).Has(SessionSettings.ODBC_LOG_USER))
+            if (_sessionSettings.Get(sessionID).Has(SessionSettings.ODBC_LOG_USER))
                 _user = _sessionSettings.Get(sessionID).GetString(SessionSettings.ODBC_LOG_USER);
 
-            if(_sessionSettings.Get(sessionID).Has(SessionSettings.ODBC_LOG_PASSWORD))
+            if (_sessionSettings.Get(sessionID).Has(SessionSettings.ODBC_LOG_PASSWORD))
                 _pwd = _sessionSettings.Get(sessionID).GetString(SessionSettings.ODBC_LOG_PASSWORD);
 
             if (_sessionSettings.Get(sessionID).Has(SessionSettings.ODBC_LOG_INCOMING_TABLE))
@@ -56,7 +56,12 @@ namespace QuickFix
 
             _connectionString = _sessionSettings.Get(sessionID).GetString(SessionSettings.ODBC_LOG_CONNECTION_STRING);
 
+
+            OdbcConnectionStringBuilder sb = new OdbcConnectionStringBuilder(_connectionString);
+            sb["UID"] = _user;
+            sb["PWD"] = _pwd;
             OdbcConnection odbc = GetODBCConnection();
+
         }
 
 
@@ -73,10 +78,8 @@ namespace QuickFix
 
         public void Clear()
         {
-            OdbcConnection odbc = GetODBCConnection();
-
             string whereClause = string.Empty;
-            if(this._sessionID != null)
+            if (this._sessionID != null)
             {
                 whereClause = whereClause + "WHERE beginstring = '" + _sessionID.BeginString + "' " +
                     "AND sendercompid = '" + _sessionID.SenderCompID + "' " +
@@ -85,10 +88,18 @@ namespace QuickFix
                 if (_sessionID.SessionQualifier.Length > 0)
                     whereClause = whereClause + "AND session_qualifier = '" + _sessionID.SessionQualifier + "' ";
             }
-            
-            OdbcCommand cmd = new OdbcCommand("DELETE FROM " + eventTable + " " + whereClause, odbc);
-            cmd.ExecuteNonQuery();
 
+            try
+            {
+                using (OdbcCommand cmd = new OdbcCommand("DELETE FROM " + eventTable + " " + whereClause, GetODBCConnection()))
+                {
+                    cmd.ExecuteNonQuery();
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.Message);
+            }
         }
 
         public void Backup(DateTime? DateThreshold = null)
@@ -160,28 +171,40 @@ namespace QuickFix
             outgoingQuery = queryStringOutgoing + "FROM " + outgoingTable + whereClause + "AND NOT( text like  '%' + char(01) + '35=0' + char(01) + '%')";
             outgoingClearQuery = "delete " + outgoingClearQuery + " " + whereClause;
 
-            OdbcConnection odbc = GetODBCConnection();
-            OdbcCommand cmdIncoming = new OdbcCommand(incomingQuery, odbc);
-            OdbcCommand cmdClearIncoming = new OdbcCommand(incomingClearQuery, odbc);
-            OdbcCommand cmdOutgoing = new OdbcCommand(outgoingQuery, odbc);
-            OdbcCommand cmdClearOutgoing = new OdbcCommand(outgoingClearQuery, odbc);
-            cmdIncoming.ExecuteNonQuery();
-            cmdClearIncoming.ExecuteNonQuery();
 
-            // To prevent duplicates, check to see if incoming table is the same as outgoing.
-            if (incomingTable != outgoingTable)
+            try
             {
-                cmdOutgoing.ExecuteNonQuery();
-                cmdClearOutgoing.ExecuteNonQuery();
+                using (OdbcConnection odbc = GetODBCConnection())
+                {
+                    OdbcCommand cmdIncoming = new OdbcCommand(incomingQuery, odbc);
+                    OdbcCommand cmdClearIncoming = new OdbcCommand(incomingClearQuery, odbc);
+                    OdbcCommand cmdOutgoing = new OdbcCommand(outgoingQuery, odbc);
+                    OdbcCommand cmdClearOutgoing = new OdbcCommand(outgoingClearQuery, odbc);
+                    cmdIncoming.ExecuteNonQuery();
+                    cmdClearIncoming.ExecuteNonQuery();
+
+                    // To prevent duplicates, check to see if incoming table is the same as outgoing.
+                    if (incomingTable != outgoingTable)
+                    {
+                        cmdOutgoing.ExecuteNonQuery();
+                        cmdClearOutgoing.ExecuteNonQuery();
+                    }
+
+                    // Backup to Event Log
+                    string logQuery = queryStringEvent + " from " + eventTable + " " + eventWhereClause;
+                    string logClearQuery = "delete " + eventTable + " " + eventWhereClause;
+                    OdbcCommand cmdEvent = new OdbcCommand(logQuery, odbc);
+                    OdbcCommand cmdClearEvent = new OdbcCommand(logClearQuery, odbc);
+                    cmdEvent.ExecuteNonQuery();
+                    cmdClearEvent.ExecuteNonQuery();
+                }
+
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.Message);
             }
 
-            // Backup to Event Log
-            string logQuery = queryStringEvent + " from " + eventTable + " " + eventWhereClause;
-            string logClearQuery = "delete " + eventTable + " " + eventWhereClause;
-            OdbcCommand cmdEvent = new OdbcCommand(logQuery, odbc);
-            OdbcCommand cmdClearEvent = new OdbcCommand(logClearQuery, odbc);
-            cmdEvent.ExecuteNonQuery();
-            cmdClearEvent.ExecuteNonQuery();
 
         }
 
@@ -213,9 +236,19 @@ namespace QuickFix
             }
 
             queryString = queryString + "'" + msg + "')";
-            OdbcConnection odbc = GetODBCConnection();
-            OdbcCommand cmd = new OdbcCommand(queryString, odbc);
-            cmd.ExecuteNonQuery();
+
+            try
+            {
+                using (OdbcConnection odbc = GetODBCConnection())
+                {
+                    OdbcCommand cmd = new OdbcCommand(queryString, odbc);
+                    cmd.ExecuteNonQuery();
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.Message);
+            }
         }
 
         public void OnOutgoing(string msg)
@@ -246,9 +279,20 @@ namespace QuickFix
             }
 
             queryString = queryString + "'" + msg + "')";
-            OdbcConnection odbc = GetODBCConnection();
-            OdbcCommand cmd = new OdbcCommand(queryString, odbc);
-            cmd.ExecuteNonQuery();
+
+            try
+            {
+                using (OdbcConnection odbc = GetODBCConnection())
+                {
+                    OdbcCommand cmd = new OdbcCommand(queryString, odbc);
+                    cmd.ExecuteNonQuery();
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.Message);
+            }
+
         }
 
         public void OnEvent(string s)
@@ -271,12 +315,22 @@ namespace QuickFix
                     queryString = queryString + "'" + "NULL" + "', ";
 
                 queryString = queryString + "'" + s + "')";
-                OdbcConnection odbc = GetODBCConnection();
-                OdbcCommand cmd = new OdbcCommand(queryString, odbc);
 
-                cmd.ExecuteNonQuery();
+
+                try
+                {
+                    using (OdbcConnection odbc = GetODBCConnection())
+                    {
+                        OdbcCommand cmd = new OdbcCommand(queryString, odbc);
+                        cmd.ExecuteNonQuery();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine(ex.Message);
+                }
             }
-            catch(Exception ex)
+            catch (Exception ex)
             {
                 Console.WriteLine(ex.Message);
             }

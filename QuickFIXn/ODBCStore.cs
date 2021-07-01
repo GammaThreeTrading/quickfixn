@@ -25,17 +25,18 @@ namespace QuickFix
         private MemoryStore cache_ = new MemoryStore();
 
         private SessionID _sessionID;
-        private OdbcConnection odbc;
         private SessionSettings _sessionSettings;
 
         private string messages_table = "messages";
         private string sessions_table = "sessions";
+        private string _connectionString = string.Empty;
+        private string _user = string.Empty;
+        private string _pwd = string.Empty;
 
         public ODBCStore(SessionID sessionId, string user, string password, string connectionString, SessionSettings settings)
         {
             _sessionID = sessionId;
             _sessionSettings = settings;
-
 
             if (_sessionSettings.Get(_sessionID).Has(SessionSettings.ODBC_STORE_SESSION_TABLE))
                 sessions_table = _sessionSettings.Get(_sessionID).GetString(SessionSettings.ODBC_STORE_SESSION_TABLE);
@@ -43,42 +44,50 @@ namespace QuickFix
             if (_sessionSettings.Get(_sessionID).Has(SessionSettings.ODBC_STORE_MESSAGES_TABLE))
                 messages_table = _sessionSettings.Get(_sessionID).GetString(SessionSettings.ODBC_STORE_MESSAGES_TABLE);
 
-            OdbcConnectionStringBuilder sb = new OdbcConnectionStringBuilder(connectionString);
-            sb["UID"] = user;
-            sb["PWD"] = password;
-            odbc = new OdbcConnection(sb.ConnectionString);
-            odbc.Open();
+            _connectionString = connectionString;
+            _user = user;
+            _pwd = password;
+
             PopulateCache();
         }
 
+        private OdbcConnection GetODBCConnection()
+        {
+            OdbcConnectionStringBuilder sb = new OdbcConnectionStringBuilder(_connectionString);
+            sb["UID"] = _user;
+            sb["PWD"] = _pwd;
+            OdbcConnection odbc = new OdbcConnection(sb.ConnectionString);
+            odbc.Open();
+            return odbc;
+        }
         public void PopulateCache()
         {
             string queryString = string.Empty;
 
-                queryString = "SELECT creation_time, incoming_seqnum, outgoing_seqnum FROM " + sessions_table + " WHERE " +
-                    "beginstring=" + "'" + _sessionID.BeginString + "' and " +
-                    "sendercompid=" + "'" + _sessionID.SenderCompID + "' and " +
-                    "targetcompid=" + "'" + _sessionID.TargetCompID + "' and " +
-                    "session_qualifier=" + "'" + _sessionID.SessionQualifier + "'";
+            queryString = "SELECT creation_time, incoming_seqnum, outgoing_seqnum FROM " + sessions_table + " WHERE " +
+                "beginstring=" + "'" + _sessionID.BeginString + "' and " +
+                "sendercompid=" + "'" + _sessionID.SenderCompID + "' and " +
+                "targetcompid=" + "'" + _sessionID.TargetCompID + "' and " +
+                "session_qualifier=" + "'" + _sessionID.SessionQualifier + "'";
 
-
-            using (OdbcCommand cmd = new OdbcCommand(queryString, odbc))
+            using (OdbcConnection odbc = GetODBCConnection())
             {
+                OdbcCommand cmd = new OdbcCommand(queryString, odbc);
                 OdbcDataReader reader = cmd.ExecuteReader();
                 int rows = 0;
-                if(reader.HasRows)
+                if (reader.HasRows)
                 {
-                    while(reader.Read())
+                    while (reader.Read())
                     {
                         rows++;
-                        if(rows > 1)
+                        if (rows > 1)
                             throw new ConfigError("Multiple entries found for session in database");
 
                         cache_.CreationTime = DateTime.SpecifyKind((DateTime)reader[0], DateTimeKind.Utc);
                         //DateTime.SpecifyKind(cache_.CreationTime.Value, DateTimeKind.Utc);
                         cache_.SetNextTargetMsgSeqNum((int)reader[1]);
                         cache_.SetNextSenderMsgSeqNum((int)reader[2]);
-                        
+
                     }
                 }
                 else
@@ -95,8 +104,8 @@ namespace QuickFix
                         cache_.GetNextSenderMsgSeqNum() + ")";
 
                     OdbcCommand cmdInsert = new OdbcCommand(insertQuery, odbc);
-                    if(0 == cmdInsert.ExecuteNonQuery())
-                        throw new ConfigError( "Unable to create session in database" );
+                    if (0 == cmdInsert.ExecuteNonQuery())
+                        throw new ConfigError("Unable to create session in database");
                 }
             }
 
@@ -107,17 +116,18 @@ namespace QuickFix
             string queryString = string.Empty;
 
 
-                queryString = queryString + "SELECT message FROM " + messages_table + " WHERE " +
-                    "beginstring=" + "'" + _sessionID.BeginString + "' and " +
-                    "sendercompid=" + "'" + _sessionID.SenderCompID + "' and " +
-                    "targetcompid=" + "'" + _sessionID.TargetCompID + "' and " +
-                    "session_qualifier=" + "'" + _sessionID.SessionQualifier + "' and " +
-                    "msgseqnum >=" + startSeqNum.ToString() + " and " + "msgseqnum<=" + endSeqNum.ToString() + " " +
-                    "ORDER BY msgseqnum";
+            queryString = queryString + "SELECT message FROM " + messages_table + " WHERE " +
+                "beginstring=" + "'" + _sessionID.BeginString + "' and " +
+                "sendercompid=" + "'" + _sessionID.SenderCompID + "' and " +
+                "targetcompid=" + "'" + _sessionID.TargetCompID + "' and " +
+                "session_qualifier=" + "'" + _sessionID.SessionQualifier + "' and " +
+                "msgseqnum >=" + startSeqNum.ToString() + " and " + "msgseqnum<=" + endSeqNum.ToString() + " " +
+                "ORDER BY msgseqnum";
 
 
-            using (OdbcCommand cmd = new OdbcCommand(queryString, odbc))
+            using (OdbcConnection odbc = GetODBCConnection())
             {
+                OdbcCommand cmd = new OdbcCommand(queryString, odbc);
                 OdbcDataReader reader = cmd.ExecuteReader();
                 if (reader.HasRows)
                 {
@@ -136,39 +146,49 @@ namespace QuickFix
             if (msg.Contains("'"))
                 msg = msg.Replace("'", "''");
 
-                queryString = "INSERT INTO " + messages_table + 
-                    " (beginstring, sendercompid, targetcompid, session_qualifier, msgseqnum, message) " +
-                    "VALUES (" +
+            queryString = "INSERT INTO " + messages_table +
+                " (beginstring, sendercompid, targetcompid, session_qualifier, msgseqnum, message) " +
+                "VALUES (" +
 
-                    "'" + _sessionID.BeginString + "'," +
-                    "'" + _sessionID.SenderCompID + "'," +
-                    "'" + _sessionID.TargetCompID + "'," +
-                    "'" + _sessionID.SessionQualifier + "'," +
-                    msgSeqNum.ToString() + "," +
-                    "'" + msg + "')";
+                "'" + _sessionID.BeginString + "'," +
+                "'" + _sessionID.SenderCompID + "'," +
+                "'" + _sessionID.TargetCompID + "'," +
+                "'" + _sessionID.SessionQualifier + "'," +
+                msgSeqNum.ToString() + "," +
+                "'" + msg + "')";
 
 
 
-            // Try to insert.  If it fails, try to UPDATE message:
-            OdbcCommand cmdInsert = new OdbcCommand(queryString, odbc);
-            if (0 == cmdInsert.ExecuteNonQuery())
+            try
             {
-                string updateQuery = string.Empty;
+                // Try to insert.  If it fails, try to UPDATE message:
+                using (OdbcConnection odbc = GetODBCConnection())
+                {
+                    OdbcCommand cmdInsert = new OdbcCommand(queryString, odbc);
+                    if (0 == cmdInsert.ExecuteNonQuery())
+                    {
+                        string updateQuery = string.Empty;
 
 
-                    updateQuery = "UDPATE " + messages_table + " SET message='" + msg + "' WHERE " +
-                        "beginstring=" + "'" + _sessionID.BeginString + "' and " +
-                        "sendercompid=" + "'" + _sessionID.SenderCompID + "' and " +
-                        "targetcompid=" + "'" + _sessionID.TargetCompID + "' and " +
-                        "session_qualifier=" + "'" + _sessionID.SessionQualifier + "' and " +
-                        "msgseqnum=" + msgSeqNum.ToString();
+                        updateQuery = "UDPATE " + messages_table + " SET message='" + msg + "' WHERE " +
+                            "beginstring=" + "'" + _sessionID.BeginString + "' and " +
+                            "sendercompid=" + "'" + _sessionID.SenderCompID + "' and " +
+                            "targetcompid=" + "'" + _sessionID.TargetCompID + "' and " +
+                            "session_qualifier=" + "'" + _sessionID.SessionQualifier + "' and " +
+                            "msgseqnum=" + msgSeqNum.ToString();
 
-
-
-
-                OdbcCommand cmdUpdate = new OdbcCommand(updateQuery, odbc);
-                cmdUpdate.ExecuteNonQuery();
+                        OdbcCommand cmdUpdate = new OdbcCommand(updateQuery, odbc);
+                        cmdUpdate.ExecuteNonQuery();
+                    }
+                }
             }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.ToString());
+            }
+
+
+
 
             return true;
         }
@@ -187,16 +207,27 @@ namespace QuickFix
         {
             string queryString = string.Empty;
 
-                queryString = queryString + "UPDATE " + sessions_table + " SET outgoing_seqnum=" + value.ToString() + " WHERE " +
-                    "beginstring=" + "'" + _sessionID.BeginString + "' and " +
-                    "sendercompid=" + "'" + _sessionID.SenderCompID + "' and " +
-                    "targetcompid=" + "'" + _sessionID.TargetCompID + "' and " +
-                    "session_qualifier=" + "'" + _sessionID.SessionQualifier + "'";
+            queryString = queryString + "UPDATE " + sessions_table + " SET outgoing_seqnum=" + value.ToString() + " WHERE " +
+                "beginstring=" + "'" + _sessionID.BeginString + "' and " +
+                "sendercompid=" + "'" + _sessionID.SenderCompID + "' and " +
+                "targetcompid=" + "'" + _sessionID.TargetCompID + "' and " +
+                "session_qualifier=" + "'" + _sessionID.SessionQualifier + "'";
 
-            OdbcCommand cmdReset = new OdbcCommand(queryString, odbc);
-            cmdReset.ExecuteNonQuery();
-            
-            cache_.SetNextSenderMsgSeqNum(value);
+            try
+            {
+                using (OdbcConnection odbc = GetODBCConnection())
+                {
+                    OdbcCommand cmdReset = new OdbcCommand(queryString, odbc);
+                    cmdReset.ExecuteNonQuery();
+                    cache_.SetNextSenderMsgSeqNum(value);
+                }
+
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.ToString());
+            }
+
         }
 
         public void SetNextTargetMsgSeqNum(int value)
@@ -205,19 +236,29 @@ namespace QuickFix
             string queryString = string.Empty;
 
 
-                queryString = queryString + "UPDATE " + sessions_table + " SET incoming_seqnum=" + value.ToString() + " WHERE " +
-                    "beginstring=" + "'" + _sessionID.BeginString + "' and " +
-                    "sendercompid=" + "'" + _sessionID.SenderCompID + "' and " +
-                    "targetcompid=" + "'" + _sessionID.TargetCompID + "' and " +
-                    "session_qualifier=" + "'" + _sessionID.SessionQualifier + "'";
+            queryString = queryString + "UPDATE " + sessions_table + " SET incoming_seqnum=" + value.ToString() + " WHERE " +
+                "beginstring=" + "'" + _sessionID.BeginString + "' and " +
+                "sendercompid=" + "'" + _sessionID.SenderCompID + "' and " +
+                "targetcompid=" + "'" + _sessionID.TargetCompID + "' and " +
+                "session_qualifier=" + "'" + _sessionID.SessionQualifier + "'";
 
 
+            try
+            {
+                using (OdbcConnection odbc = GetODBCConnection())
+                {
+                    OdbcCommand cmdReset = new OdbcCommand(queryString, odbc);
+                    cmdReset.ExecuteNonQuery();
 
+                    cache_.SetNextTargetMsgSeqNum(value);
+                }
 
-            OdbcCommand cmdReset = new OdbcCommand(queryString, odbc);
-            cmdReset.ExecuteNonQuery();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.ToString());
+            }
 
-            cache_.SetNextTargetMsgSeqNum(value);
         }
 
         public void IncrNextSenderMsgSeqNum()
@@ -239,24 +280,34 @@ namespace QuickFix
 
         public DateTime GetCreationTime()
         {
-             return cache_.CreationTime.Value; 
+            return cache_.CreationTime.Value;
         }
 
         public void Reset()
         {
-
             string queryString = string.Empty;
-            OdbcCommand cmdReset = null;
+
+            queryString = queryString + "DELETE from " + messages_table + " WHERE " +
+                "beginstring=" + "'" + _sessionID.BeginString + "' and " +
+                "sendercompid=" + "'" + _sessionID.SenderCompID + "' and " +
+                "targetcompid=" + "'" + _sessionID.TargetCompID + "' and " +
+                "session_qualifier=" + "'" + _sessionID.SessionQualifier + "'";
+
+            try
+            {
+                using (OdbcConnection odbc = GetODBCConnection())
+                {
+                    OdbcCommand cmdReset = new OdbcCommand(queryString, odbc);
+                    cmdReset.ExecuteNonQuery();
+                }
+
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.ToString());
+            }
 
 
-                queryString = queryString + "DELETE from " + messages_table + " WHERE " +
-                    "beginstring=" + "'" + _sessionID.BeginString + "' and " +
-                    "sendercompid=" + "'" + _sessionID.SenderCompID + "' and " +
-                    "targetcompid=" + "'" + _sessionID.TargetCompID + "' and " +
-                    "session_qualifier=" + "'" + _sessionID.SessionQualifier + "'";
-
-                cmdReset = new OdbcCommand(queryString, odbc);
-                cmdReset.ExecuteNonQuery();
 
 
 
@@ -265,19 +316,27 @@ namespace QuickFix
 
             string sqlTime = ODBCHelper.DateTimeToODBCConverter(time.Value);
 
-                queryString = "UPDATE " + sessions_table + " SET creation_time={ts '" + sqlTime + "'}, " +
-                     "incoming_seqnum=" + cache_.GetNextTargetMsgSeqNum() + ", "
-                    + "outgoing_seqnum=" + cache_.GetNextSenderMsgSeqNum() + " WHERE "
-                    + "beginstring=" + "'" + _sessionID.BeginString + "' and "
-                    + "sendercompid=" + "'" + _sessionID.SenderCompID + "' and "
-                    + "targetcompid=" + "'" + _sessionID.TargetCompID + "' and "
-                    + "session_qualifier=" + "'" + _sessionID.SessionQualifier + "'";
+            queryString = "UPDATE " + sessions_table + " SET creation_time={ts '" + sqlTime + "'}, " +
+                 "incoming_seqnum=" + cache_.GetNextTargetMsgSeqNum() + ", "
+                + "outgoing_seqnum=" + cache_.GetNextSenderMsgSeqNum() + " WHERE "
+                + "beginstring=" + "'" + _sessionID.BeginString + "' and "
+                + "sendercompid=" + "'" + _sessionID.SenderCompID + "' and "
+                + "targetcompid=" + "'" + _sessionID.TargetCompID + "' and "
+                + "session_qualifier=" + "'" + _sessionID.SessionQualifier + "'";
 
+            try
+            {
+                using (OdbcConnection odbc = GetODBCConnection())
+                {
+                    OdbcCommand cmdReset = new OdbcCommand(queryString, odbc);
+                    cmdReset.ExecuteNonQuery();
+                }
 
-
-            cmdReset = new OdbcCommand(queryString, odbc);
-            cmdReset.ExecuteNonQuery();
-
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.ToString());
+            }
 
         }
 

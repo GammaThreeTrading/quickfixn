@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFrameworks>net452;netcoreapp3.1</TargetFrameworks>
+    <TargetFrameworks>net452;net5.0</TargetFrameworks>
     <Title>QuickFIX/n</Title>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <GenerateAppxPackageOnBuild>true</GenerateAppxPackageOnBuild>
@@ -40,13 +40,13 @@
     <Reference Include="System.Web" />
   </ItemGroup>
 
-  <ItemGroup Condition="'$(TargetFramework)' == 'netcoreapp3.1'">
+  <ItemGroup Condition="'$(TargetFramework)' == 'net5.0'">
     <PackageReference Include="System.Data.Odbc">
       <Version>4.7.0</Version>
     </PackageReference>
   </ItemGroup>
 
-  <PropertyGroup Condition="'$(TargetFramework)' == 'netcoreapp3.1'">
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net5.0'">
     <DefineConstants>$(DefineConstants);MISSING_SYSTEMWEBUI</DefineConstants>
   </PropertyGroup>
 

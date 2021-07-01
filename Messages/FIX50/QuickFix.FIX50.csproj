@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFrameworks>net452;netcoreapp3.1</TargetFrameworks>
+    <TargetFrameworks>net452;net5.0</TargetFrameworks>
     <GenerateAppxPackageOnBuild>true</GenerateAppxPackageOnBuild>
     <Title>QuickFIX/n FIX5.0 Messages</Title>
     <PackageId>QuickFIXn.FIX5.0</PackageId>
