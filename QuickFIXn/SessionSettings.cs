@@ -83,6 +83,26 @@ namespace QuickFix
         public const string ODBC_LOG_EVENT_BACKUP_TABLE = "OdbcLogEventBackupTable";
         public const string ODBC_STORE_SESSION_TABLE = "OdbcStoreSessionTable";
         public const string ODBC_STORE_MESSAGES_TABLE = "OdbcStoreMessagesTable";
+        public const string SQL_STORE_CONNECTION_STRING = "SQLStoreConnectionString";
+        public const string SQL_LOG_CONNECTION_STRING = "SQLLogConnectionString";
+        public const string SQL_STORE_USER = "SQLStoreUser";
+        public const string SQL_STORE_PASSWORD = "SQLStorePassword";
+        public const string SQL_LOG_USER = "SQLLogUser";
+        public const string SQL_LOG_PASSWORD = "SQLLogPassword";
+        public const string SQL_LOG_INCOMING_TABLE = "SQLLogIncomingTable";
+        public const string SQL_LOG_INCOMING_BACKUP_TABLE = "SQLLogIncomingBackupTable";
+        public const string SQL_LOG_OUTGOING_TABLE = "SQLLogOutgoingTable";
+        public const string SQL_LOG_OUTGOING_BACKUP_TABLE = "SQLLogOutgoingBackupTable";
+        public const string SQL_LOG_EVENT_TABLE = "SQLLogEventTable";
+        public const string SQL_LOG_EVENT_BACKUP_TABLE = "SQLLogEventBackupTable";
+        public const string SQL_STORE_SESSION_TABLE = "SQLStoreSessionTable";
+        public const string SQL_STORE_MESSAGES_TABLE = "SQLStoreMessagesTable";
+        public const string SQL_STORE_DATASOURCE = "SQLStoreDatasource";
+        public const string SQL_STORE_INITIAL_CATALOG = "SQLStoreInitialCatalog";
+        public const string SQL_LOG_DATASOURCE = "SQLLogDatasource";
+        public const string SQL_LOG_INITIAL_CATALOG = "SQLLogInitialCatalog";
+
+
 
         public const string SSL_ENABLE = "SSLEnable";
         public const string SSL_SERVERNAME = "SSLServerName";
