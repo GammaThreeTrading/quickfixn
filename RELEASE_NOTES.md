@@ -12,6 +12,10 @@ What's New
 * (patch) #630 - Make DefaultMessageFactory reflect only over QF/n assemblies (gbirchmeier)
 * (patch) #643 - add 1156 (ApplExtId) to FIXT11.xml (gbirchmeier)
 * (patch) #642 - allow decimal fields to have exponential notation (rakker91)
+* (patch) #663/#657 - fix call to Directory.GetFiles for case-sensitive filesystems (johna1203/jatrofka)
+* (patch) #626 - Dynamic SocketAcceptPort bugfix (akamyshanov)
+* (patch) #662 - fix NullRefEx in AbstractInitiator.IsLoggedOn (gbirchmeier, thanks to akpwhg)
+* (patch) #542 - log before crash when port is not available (rodrigopscampos)
 
 ### v1.10.0:
 * (patch) #505 - Fix ObjectDisposedException when SocketInitiator is stopped before connection attempt fails (musashibg)
