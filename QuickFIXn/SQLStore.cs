@@ -274,7 +274,7 @@ namespace QuickFix
 
                         sqlConnection.Open();
                         var rowsAffected = dbCommand.ExecuteNonQuery();
-
+                        cache_.SetNextSenderMsgSeqNum(value);
                     }
                 }
 
