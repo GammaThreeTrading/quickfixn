@@ -502,7 +502,7 @@ namespace Acceptor
             var uri = new Uri(url);
 
             // this gets all the query string key value pairs as a collection
-            var newQueryString = HttpUtility.ParseQueryString(uri.Query);
+            var newQueryString = System.Web.HttpUtility.ParseQueryString(uri.Query);
 
             // this removes the key if exists
             newQueryString.Remove(key);
