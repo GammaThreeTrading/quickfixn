@@ -180,6 +180,12 @@ namespace QuickFix
                     OdbcCommand cmdClearIncoming = new OdbcCommand(incomingClearQuery, odbc);
                     OdbcCommand cmdOutgoing = new OdbcCommand(outgoingQuery, odbc);
                     OdbcCommand cmdClearOutgoing = new OdbcCommand(outgoingClearQuery, odbc);
+
+                    cmdIncoming.CommandTimeout = 120;
+                    cmdClearIncoming.CommandTimeout = 120;
+                    cmdOutgoing.CommandTimeout = 120;
+                    cmdClearOutgoing.CommandTimeout = 120;
+
                     cmdIncoming.ExecuteNonQuery();
                     cmdClearIncoming.ExecuteNonQuery();
 

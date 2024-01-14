@@ -2,7 +2,7 @@
   "profiles": {
     "Examples.TradeClient": {
       "commandName": "Project",
-      "commandLineArgs": "tradeclient.cfg"
+      "commandLineArgs": "C:\\Users\\gregg\\Documents\\Github\\quickfixn\\Examples\\TradeClient\\bin\\Debug\\net452\\tradeclient.cfg"
     }
   }
 }
