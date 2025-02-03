@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFrameworks>net452;net5.0</TargetFrameworks>
+    <TargetFrameworks>net48;net8.0</TargetFrameworks>
     <RootNamespace>SimpleAcceptor</RootNamespace>
     <AssemblyName>SimpleAcceptor</AssemblyName>
     <Copyright>Copyright © Connamara Systems, LLC 2011</Copyright>
