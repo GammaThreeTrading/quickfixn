@@ -1,65 +1,60 @@
+using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Net;
+using QuickFix.Logger;
 
 namespace QuickFix
 {
     internal class AcceptorSocketDescriptor
     {
-        #region Properties
+        public ThreadedSocketReactor SocketReactor { get; }
+        public IPEndPoint Address { get; }
 
-        public ThreadedSocketReactor SocketReactor
+        private readonly Dictionary<SessionID, Session> _acceptedSessions = new ();
+
+        public AcceptorSocketDescriptor(
+            IPEndPoint socketEndPoint,
+            SocketSettings socketSettings,
+            NonSessionLog nonSessionLog)
         {
-            get { return socketReactor_; }
+            Address = socketEndPoint;
+            SocketReactor = new ThreadedSocketReactor(Address, socketSettings, this, nonSessionLog);
         }
 
-        public IPEndPoint Address
+        [Obsolete("Param 'sessionDict' is unused.  Use the alt constructor without it.")]
+        public AcceptorSocketDescriptor(
+            IPEndPoint socketEndPoint,
+            SocketSettings socketSettings,
+            SettingsDictionary sessionDict,
+            NonSessionLog nonSessionLog) : this(socketEndPoint, socketSettings, nonSessionLog)
+        { }
+
+        internal void AcceptSession(Session session)
         {
-            get { return socketEndPoint_; }
-        }
-
-        #endregion
-
-        #region Private Members
-
-        private ThreadedSocketReactor socketReactor_;
-        private IPEndPoint socketEndPoint_;
-        private Dictionary<SessionID, Session> acceptedSessions_ = new Dictionary<SessionID, Session>();
-
-        #endregion
-
-        public AcceptorSocketDescriptor(IPEndPoint socketEndPoint, SocketSettings socketSettings, QuickFix.Dictionary sessionDict)
-        {
-            socketEndPoint_ = socketEndPoint;
-            socketReactor_ = new ThreadedSocketReactor(socketEndPoint_, socketSettings, sessionDict, this);
-        }
-
-        public void AcceptSession(Session session)
-        {
-            lock (acceptedSessions_)
+            lock (_acceptedSessions)
             {
-                acceptedSessions_[session.SessionID] = session;
+                _acceptedSessions[session.SessionID] = session;
             }
         }
 
         /// <summary>
         /// Remove a session from those tied to this socket.
         /// </summary>
-        /// <param name="sessionID">ID of session to be removed</param>
+        /// <param name="sessionId">ID of session to be removed</param>
         /// <returns>true if session removed, false if not found</returns>
-        public bool RemoveSession(SessionID sessionID)
+        internal bool RemoveSession(SessionID sessionId)
         {
-            lock (acceptedSessions_)
+            lock (_acceptedSessions)
             {
-                return acceptedSessions_.Remove(sessionID);
+                return _acceptedSessions.Remove(sessionId);
             }
         }
 
-        public Dictionary<SessionID, Session> GetAcceptedSessions()
+        internal Dictionary<SessionID, Session> GetAcceptedSessions()
         {
-            lock (acceptedSessions_)
+            lock (_acceptedSessions)
             {
-                return new Dictionary<SessionID, Session>(acceptedSessions_);
+                return new Dictionary<SessionID, Session>(_acceptedSessions);
             }
         }
     }

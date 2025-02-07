@@ -1,18 +1,14 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
+﻿using System.Collections.Generic;
 using NUnit.Framework;
 using QuickFix;
-using QuickFix.Fields;
 using System.Reflection;
-
 
 namespace UnitTests
 {
     [TestFixture]
     public class MessageCrackerTests
     {
-        private readonly SessionID _DummySessionID = new SessionID("a","b","c");
+        private readonly SessionID _dummySessionId = new ("a","b","c");
 
         [SetUp]
         public void Setup()
@@ -65,9 +61,9 @@ namespace UnitTests
                 }
             }
 
-            Assert.AreEqual(2, handlers.Count);
-            Assert.AreEqual(handlers[0].GetParameters()[0].ParameterType, typeof(QuickFix.FIX42.News));
-            Assert.AreEqual(handlers[1].GetParameters()[0].ParameterType, typeof(QuickFix.FIXT11.Logon));
+            Assert.That(handlers.Count, Is.EqualTo(2));
+            Assert.That(typeof(QuickFix.FIX42.News), Is.EqualTo(handlers[0].GetParameters()[0].ParameterType));
+            Assert.That(typeof(QuickFix.FIXT11.Logon), Is.EqualTo(handlers[1].GetParameters()[0].ParameterType));
         }
 
 
@@ -87,30 +83,30 @@ namespace UnitTests
         public void GoldenPath()
         {
             MessageCracker mc = new TestCracker();
-            TestCracker tc = mc as TestCracker;
+            TestCracker tc = (mc as TestCracker)!;
 
-            mc.Crack(new QuickFix.FIX42.News(), _DummySessionID);
-            Assert.IsTrue(tc.CrackedNews42);
-            Assert.IsFalse(tc.CrackedNews44);
+            mc.Crack(new QuickFix.FIX42.News(), _dummySessionId);
+            Assert.That(tc.CrackedNews42, Is.True);
+            Assert.That(tc.CrackedNews44, Is.False);
 
             // reset and do the opposite
             tc.CrackedNews42 = false;
 
-            mc.Crack(new QuickFix.FIX44.News(), _DummySessionID);
-            Assert.IsFalse(tc.CrackedNews42);
-            Assert.IsTrue(tc.CrackedNews44);
+            mc.Crack(new QuickFix.FIX44.News(), _dummySessionId);
+            Assert.That(tc.CrackedNews42, Is.False);
+            Assert.That(tc.CrackedNews44, Is.True);
 
-            Assert.IsFalse(tc.CrackedLogonFIXT11);
-            mc.Crack(new QuickFix.FIXT11.Logon(), _DummySessionID);
-            Assert.IsTrue(tc.CrackedLogonFIXT11);
+            Assert.That(tc.CrackedLogonFIXT11, Is.False);
+            mc.Crack(new QuickFix.FIXT11.Logon(), _dummySessionId);
+            Assert.That(tc.CrackedLogonFIXT11, Is.True);
         }
 
         [Test]
         public void UnsupportedMessage()
         {
             MessageCracker mc = new TestCracker();
-            Assert.Throws<UnsupportedMessageType>(delegate { mc.Crack(new QuickFix.FIX42.Email(), _DummySessionID); });
-            Assert.Throws<UnsupportedMessageType>(delegate { mc.Crack(new QuickFix.FIX43.News(), _DummySessionID); });
+            Assert.Throws<UnsupportedMessageType>(delegate { mc.Crack(new QuickFix.FIX42.Email(), _dummySessionId); });
+            Assert.Throws<UnsupportedMessageType>(delegate { mc.Crack(new QuickFix.FIX43.News(), _dummySessionId); });
         }
     }
 }

@@ -1,16 +1,22 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFrameworks>net452;net5.0</TargetFrameworks>
+    <TargetFramework>net8.0</TargetFramework>
     <Title>QuickFIX/n</Title>
+    <Nullable>enable</Nullable>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <GenerateAppxPackageOnBuild>true</GenerateAppxPackageOnBuild>
     <PackageId>QuickFIXn.Core</PackageId>
     <PackageTitle>$(Title)</PackageTitle>
-    <Description>Open-source C# implementation of QuickFIX. This package contains the core classes for building applications implementing the FIX protocols. To create an application targeting a specific FIX protocol version, choose the appropriate FIX protocol-specific QuickFIXn package instead.</Description>
+    <Description>
+      Open-source C# implementation of QuickFIX.
+      This package contains the core classes for building applications implementing the FIX protocols.
+      You will also need a messages package containing message definitions for the FIX version
+      (e.g. FIX44 or FIX50) that you will be using.
+    </Description>
     <Copyright>Copyright © 2011 - $([System.DateTime]::UtcNow.Year) QuickFIXn.org. All rights reserved.</Copyright>
     <Authors>Connamara Systems, LLC and QuickFIX/n contributors</Authors>
-    <Version>1.9.0</Version>
+    <Version>1.13.0</Version>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
     <RootNamespace>QuickFix</RootNamespace>
     <Platforms>AnyCPU;x64</Platforms>
@@ -22,13 +28,14 @@
     <PackageProjectUrl>http://quickfixn.org/</PackageProjectUrl>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>qfn-icon.png</PackageIcon>
   </PropertyGroup>
 
   <ItemGroup>
-    <None Include="..\LICENSE">
-      <Pack>True</Pack>
-      <PackagePath></PackagePath>
-    </None>
+    <None Include="..\LICENSE" Pack="true" PackagePath=""/>
+    <None Include="..\nuget-enclosures\core-readme.md" Pack="true" PackagePath="README.md" />
+    <None Include="..\nuget-enclosures\qfn-icon.png" Pack="True" PackagePath="" />
   </ItemGroup>
 
   <ItemGroup>
@@ -36,18 +43,4 @@
       <_Parameter1>UnitTests</_Parameter1>
     </AssemblyAttribute>
   </ItemGroup>
-  <ItemGroup Condition="'$(TargetFramework)' == 'net452'">
-    <Reference Include="System.Web" />
-  </ItemGroup>
-
-  <ItemGroup Condition="'$(TargetFramework)' == 'net5.0'">
-    <PackageReference Include="System.Data.Odbc">
-      <Version>4.7.0</Version>
-    </PackageReference>
-  </ItemGroup>
-
-  <PropertyGroup Condition="'$(TargetFramework)' == 'net5.0'">
-    <DefineConstants>$(DefineConstants);MISSING_SYSTEMWEBUI</DefineConstants>
-  </PropertyGroup>
-
 </Project>

@@ -1,12 +1,5 @@
-﻿
-namespace QuickFix
+﻿namespace QuickFix
 {
-    /// <summary>
-    /// (Renamed per naming convention.)
-    /// </summary>
-    [System.Obsolete("Use IApplication instead.")]
-    public interface Application : IApplication { }
-
     /// <summary>
     /// This is the primary interface for processing session messages.
     /// </summary>
@@ -16,8 +9,10 @@ namespace QuickFix
         /// This callback provides you with a peek at the administrative messages
         /// that are being sent from your FIX engine to the counter party. This is
         /// normally not useful for an application however it is provided for any
-        /// logging you may wish to do. You may add fields in an adminstrative
+        /// logging you may wish to do. You may add fields in an administrative
         /// message before it is sent.
+        /// In some rare cases, it might be useful to throw a DoNotSend exception
+        /// in this function to suppress sending of the message by the application.
         /// </summary>
         /// <param name="message"></param>
         /// <param name="sessionID"></param>
@@ -25,7 +20,7 @@ namespace QuickFix
 
         /// <summary>
         /// This callback notifies you when an administrative message is sent from a
-        /// counterparty to your FIX engine. This can be usefull for doing extra
+        /// counterparty to your FIX engine. This can be useful for doing extra
         /// validation on logon messages such as for checking passwords. Throwing a
         /// RejectLogon exception will disconnect the counterparty.
         /// </summary>

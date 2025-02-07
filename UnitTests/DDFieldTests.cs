@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
+using Microsoft.VisualBasic;
 using NUnit.Framework;
-using QuickFix;
 using QuickFix.DataDictionary;
 
 namespace UnitTests
@@ -10,7 +10,7 @@ namespace UnitTests
     public class DDFieldTests
     {
         [Test]
-        public void Constructor()
+        public void CtorEnum()
         {
             Dictionary<String, String> enums = new Dictionary<string, string>();
             enums["a"] = "AAA";
@@ -18,39 +18,29 @@ namespace UnitTests
 
             DDField ddf = new DDField(5, "Foo", enums, "STRING");
 
-            Assert.AreEqual(2, ddf.EnumDict.Count);
-            Assert.AreEqual("AAA", ddf.EnumDict["a"]);
-            Assert.AreEqual("BBB", ddf.EnumDict["b"]);
+            Assert.That(5, Is.EqualTo(ddf.Tag));
+            Assert.That("Foo", Is.EqualTo(ddf.Name));
+            Assert.That(enums, Is.EqualTo(ddf.EnumDict));
+            Assert.That("STRING", Is.EqualTo(ddf.FixFldType));
+            Assert.That(typeof(QuickFix.Fields.StringField), Is.EqualTo(ddf.FieldType));
 
-            //obsolete accessor
-#pragma warning disable 618
-            Assert.AreEqual(2, ddf.Enums.Count);
-            Assert.IsTrue(ddf.Enums.Contains("a"));
-            Assert.IsTrue(ddf.Enums.Contains("b"));
-#pragma warning restore 618
+            Assert.That(ddf.IsMultipleValueFieldWithEnums, Is.False);
+            Assert.That(ddf.HasEnums(), Is.True);
         }
 
-
         [Test]
-        public void ObsoleteConstructor()
+        public void CtorMultipleValueFieldWithEnums()
         {
-            HashSet<String> enums = new HashSet<string>();
-            enums.Add("a");
-            enums.Add("b");
+            DDField ddf = new DDField(111, "MultiX", new Dictionary<string, string>(), "MULTIPLEVALUESTRING");
 
-#pragma warning disable 618
-            DDField ddf = new DDField(5, "Foo", enums, "STRING");
-#pragma warning restore 618
+            Assert.That(111, Is.EqualTo(ddf.Tag));
+            Assert.That("MultiX", Is.EqualTo(ddf.Name));
+            Assert.That(0, Is.EqualTo(ddf.EnumDict.Count));
+            Assert.That("MULTIPLEVALUESTRING", Is.EqualTo(ddf.FixFldType));
+            Assert.That(typeof(QuickFix.Fields.StringField), Is.EqualTo(ddf.FieldType));
 
-            Assert.AreEqual(String.Empty, ddf.EnumDict["a"]);
-            Assert.AreEqual(String.Empty, ddf.EnumDict["b"]);
-
-            //obsolete accessor
-#pragma warning disable 618
-            Assert.AreEqual(2,ddf.Enums.Count);
-            Assert.IsTrue(ddf.Enums.Contains("a"));
-            Assert.IsTrue(ddf.Enums.Contains("b"));
-#pragma warning restore 618
+            Assert.That(ddf.IsMultipleValueFieldWithEnums, Is.True);
+            Assert.That(ddf.HasEnums(), Is.False);
         }
     }
 }

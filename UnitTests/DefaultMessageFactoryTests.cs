@@ -15,14 +15,14 @@ namespace UnitTests
         {
             DefaultMessageFactory dmf = new DefaultMessageFactory(QuickFix.FixValues.ApplVerID.FIX50);
 
-            Group g44 = dmf.Create("FIX.4.4", "B", 33);
-            Assert.IsInstanceOf<QuickFix.FIX44.News.LinesOfTextGroup>(g44);
+            Group? g44 = dmf.Create("FIX.4.4", "B", 33);
+            Assert.That(g44, Is.InstanceOf<QuickFix.FIX44.News.LinesOfTextGroup>());
 
-            Group g50 = dmf.Create("FIXT.1.1", "B", 33);
-            Assert.IsInstanceOf<QuickFix.FIX50.News.NoLinesOfTextGroup>(g50);
+            Group? g50 = dmf.Create("FIXT.1.1", "B", 33);
+            Assert.That(g50, Is.InstanceOf<QuickFix.FIX50.News.NoLinesOfTextGroup>());
 
-            Group g50sp2 = dmf.Create("FIXT.1.1", "CD", QuickFix.Fields.Tags.NoAsgnReqs);
-            Assert.IsNull(g50sp2);
+            Group? g50sp2 = dmf.Create("FIXT.1.1", "CD", QuickFix.Fields.Tags.NoAsgnReqs);
+            Assert.That(g50sp2, Is.Null);
         }
 
         [Test]
@@ -30,11 +30,11 @@ namespace UnitTests
         {
             DefaultMessageFactory dmf = new DefaultMessageFactory();
 
-            Group g44 = dmf.Create("FIX.4.4", "B", 33);
-            Assert.IsInstanceOf<QuickFix.FIX44.News.LinesOfTextGroup>(g44);
+            Group? g44 = dmf.Create("FIX.4.4", "B", 33);
+            Assert.That(g44, Is.InstanceOf<QuickFix.FIX44.News.LinesOfTextGroup>());
 
-            Group g50sp2 = dmf.Create("FIXT.1.1", "CD", QuickFix.Fields.Tags.NoAsgnReqs);
-            Assert.IsInstanceOf<QuickFix.FIX50SP2.StreamAssignmentReport.NoAsgnReqsGroup>(g50sp2);
+            Group? g50sp2 = dmf.Create("FIXT.1.1", "CD", QuickFix.Fields.Tags.NoAsgnReqs);
+            Assert.That(g50sp2, Is.InstanceOf<QuickFix.FIX50SP2.StreamAssignmentReport.NoAsgnReqsGroup>());
         }
     }
 }
