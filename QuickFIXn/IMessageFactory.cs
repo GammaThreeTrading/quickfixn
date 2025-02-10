@@ -14,7 +14,9 @@ namespace QuickFix
         ICollection<string> GetSupportedBeginStrings();
         
         /// <summary>
-        /// Creates a message for a specified type and FIX version
+        /// Creates a message for a specified type and FIX version.
+        /// (FIXT11 apps should use the other Create method with explicit applVerId,
+        /// or devise some other way of specifying the FIX version)
         /// </summary>
         /// <param name="beginString">the FIX version (e.g. "FIX.4.2")</param>
         /// <param name="msgType">the FIX message type (e.g. "D" for a NewOrderSingle)</param>
@@ -25,7 +27,7 @@ namespace QuickFix
         /// Creates a message for a specified type, FIX version, and ApplVerID
         /// </summary>
         /// <param name="beginString">the FIX version (e.g. "FIX.4.2")</param>
-        /// <param name="applVerId">the ApplVerID (for example "6" for FIX44)</param>
+        /// <param name="applVerId">the ApplVerID to use if the BeginString is not specific enough (e.g. if it's FIXT11)</param>
         /// <param name="msgType">the FIX message type (e.g. "D" for a NewOrderSingle)</param>
         /// <returns>a message instance of proper derived type</returns>
         Message Create(string beginString, QuickFix.Fields.ApplVerID applVerId, string msgType);
@@ -37,7 +39,7 @@ namespace QuickFix
         /// <param name="beginString">the FIX version (e.g. "FIX.4.2")</param>
         /// <param name="msgType">message type of the enclosing message (e.g. "D" for a NewOrderSingle</param>
         /// <param name="groupCounterTag">the tag of the group's counter field</param>
-        /// <returns>group, or null if the group can't be created</returns>
-        Group Create(string beginString, string msgType, int groupCounterTag);
+        /// <returns>A group, or null if the group can't be created</returns>
+        Group? Create(string beginString, string msgType, int groupCounterTag);
     }
 }

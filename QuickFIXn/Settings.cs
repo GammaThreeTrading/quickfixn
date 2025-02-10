@@ -4,13 +4,13 @@ namespace QuickFix
 {
     public class Settings
     {
-        private LinkedList<QuickFix.Dictionary> sections_ = new LinkedList<QuickFix.Dictionary>();
+        private readonly LinkedList<SettingsDictionary> _sections = new();
 
         public Settings(System.IO.TextReader conf)
         {
-            QuickFix.Dictionary currentSection = null;
+            SettingsDictionary? currentSection = null;
 
-            string line = null;
+            string? line;
             while ((line = conf.ReadLine()) != null)
             {
                 line = line.Trim();
@@ -18,9 +18,10 @@ namespace QuickFix
                 {
                     continue;
                 }
-                else if (IsSection(line))
+
+                if (IsSection(line))
                 {
-                    currentSection = Add(new Dictionary(SplitSection(line)));
+                    currentSection = Add(new SettingsDictionary(SplitSection(line)));
                 }
                 else if (IsKeyValue(line) && currentSection != null)
                 {
@@ -56,12 +57,12 @@ namespace QuickFix
         {
             if (s.Length < 2)
                 return false;
-            return s[0] == '[' && s[s.Length - 1] == ']';
+            return s[0] == '[' && s[^1] == ']';
         }
 
-        public QuickFix.Dictionary Add(QuickFix.Dictionary section)
+        public SettingsDictionary Add(SettingsDictionary section)
         {
-            sections_.AddLast(section);
+            _sections.AddLast(section);
             return section;
         }
 
@@ -71,10 +72,10 @@ namespace QuickFix
         /// </summary>
         /// <param name="sectionName">(case is ignored)</param>
         /// <returns></returns>
-        public LinkedList<QuickFix.Dictionary> Get(string sectionName)
+        public LinkedList<SettingsDictionary> Get(string sectionName)
         {
-            LinkedList<QuickFix.Dictionary> result = new LinkedList<Dictionary>();
-            foreach (QuickFix.Dictionary dict in sections_)
+            LinkedList<SettingsDictionary> result = new();
+            foreach (SettingsDictionary dict in _sections)
                 if (sectionName.ToUpperInvariant() == dict.Name.ToUpperInvariant())
                     result.AddLast(dict);
             return result;

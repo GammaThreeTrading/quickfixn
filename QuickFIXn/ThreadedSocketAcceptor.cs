@@ -2,6 +2,8 @@
 using System.Linq;
 using System.Net;
 using System;
+using QuickFix.Logger;
+using QuickFix.Store;
 
 namespace QuickFix
 {
@@ -11,38 +13,16 @@ namespace QuickFix
     /// </summary>
     public class ThreadedSocketAcceptor : IAcceptor
     {
-        
-
-        private Dictionary<SessionID, Session> sessions_ = new Dictionary<SessionID, Session>();
-        private SessionSettings settings_;
-        private Dictionary<IPEndPoint, AcceptorSocketDescriptor> socketDescriptorForAddress_ = new Dictionary<IPEndPoint, AcceptorSocketDescriptor>();
-        private SessionFactory sessionFactory_;
-        private bool isStarted_ = false;
+        private readonly Dictionary<SessionID, Session> _sessions = new();
+        private readonly SessionSettings _settings;
+        private readonly Dictionary<IPEndPoint, AcceptorSocketDescriptor> _socketDescriptorForAddress = new();
+        private readonly SessionFactory _sessionFactory;
+        private bool _isStarted = false;
         private bool _disposed = false;
-        private object sync_ = new object();
+        private readonly object _sync = new();
+        private readonly NonSessionLog _nonSessionLog;
 
         #region Constructors
-
-        /// <summary>
-        /// Create a ThreadedSocketAcceptor with a NullLogFactory and DefaultMessageFactory
-        /// </summary>
-        /// <param name="application"></param>
-        /// <param name="storeFactory"></param>
-        /// <param name="settings"></param>
-        public ThreadedSocketAcceptor(IApplication application, IMessageStoreFactory storeFactory, SessionSettings settings)
-            : this(application, storeFactory, settings, null, null)
-        { }
-
-        /// <summary>
-        /// Create a ThreadedSocketAcceptor with a DefaultMessageFactory
-        /// </summary>
-        /// <param name="application"></param>
-        /// <param name="storeFactory"></param>
-        /// <param name="settings"></param>
-        /// <param name="logFactory"></param>
-        public ThreadedSocketAcceptor(IApplication application, IMessageStoreFactory storeFactory, SessionSettings settings, ILogFactory logFactory)
-            : this(application, storeFactory, settings, logFactory, null)
-        { }
 
         /// <summary>
         /// Create a ThreadedSocketAcceptor
@@ -56,31 +36,24 @@ namespace QuickFix
             IApplication application,
             IMessageStoreFactory storeFactory,
             SessionSettings settings,
-            ILogFactory logFactory,
-            IMessageFactory messageFactory)
+            ILogFactory? logFactory = null,
+            IMessageFactory? messageFactory = null)
         {
-            logFactory = logFactory ?? new NullLogFactory();
-            messageFactory = messageFactory ?? new DefaultMessageFactory();
-            SessionFactory sf = new SessionFactory(application, storeFactory, logFactory, messageFactory);
+            ILogFactory lf = logFactory ?? new NullLogFactory();
+            IMessageFactory mf = messageFactory ?? new DefaultMessageFactory();
+            _settings = settings;
+            _sessionFactory = new SessionFactory(application, storeFactory, lf, mf);
+            _nonSessionLog = new NonSessionLog(lf);
 
             try
             {
-                CreateSessions(settings, sf);
+                foreach (SessionID sessionId in settings.GetSessions())
+                {
+                    SettingsDictionary dict = settings.Get(sessionId);
+                    CreateSession(sessionId, dict);
+                }
             }
-            catch (System.Exception e)
-            {
-                throw new ConfigError(e.Message, e);
-            }
-        }
-
-        [Obsolete("Will be removed in a future release.")]
-        public ThreadedSocketAcceptor(SessionFactory sessionFactory, SessionSettings settings)
-        {
-            try
-            {
-                CreateSessions(settings, sessionFactory);
-            }
-            catch (System.Exception e)
+            catch (Exception e)
             {
                 throw new ConfigError(e.Message, e);
             }
@@ -90,18 +63,7 @@ namespace QuickFix
 
         #region Private Methods
 
-        private void CreateSessions(SessionSettings settings, SessionFactory sessionFactory)
-        {
-            sessionFactory_ = sessionFactory;
-            settings_ = settings;
-            foreach (SessionID sessionID in settings.GetSessions())
-            {
-                QuickFix.Dictionary dict = settings.Get(sessionID);
-                CreateSession(sessionID, dict);
-            }
-        }
-
-        private AcceptorSocketDescriptor GetAcceptorSocketDescriptor(Dictionary dict)
+        private AcceptorSocketDescriptor GetAcceptorSocketDescriptor(SettingsDictionary dict)
         {
             int port = System.Convert.ToInt32(dict.GetLong(SessionSettings.SOCKET_ACCEPT_PORT));
             SocketSettings socketSettings = new SocketSettings();
@@ -109,11 +71,19 @@ namespace QuickFix
             IPEndPoint socketEndPoint;
             if (dict.Has(SessionSettings.SOCKET_ACCEPT_HOST))
             {
-                string host = dict.GetString(SessionSettings.SOCKET_ACCEPT_HOST);                
-                IPAddress[] addrs = Dns.GetHostAddresses(host);
-                socketEndPoint = new IPEndPoint(addrs[0], port);
-                // Set hostname (if it is not already configured)
-                socketSettings.ServerCommonName = socketSettings.ServerCommonName ?? host;
+                string host = dict.GetString(SessionSettings.SOCKET_ACCEPT_HOST);
+
+                if (IsAnyIpAddress(host))
+                {
+                    socketEndPoint = new IPEndPoint(IPAddress.Any, port);
+                }
+                else
+                {
+                    IPAddress[] addrs = Dns.GetHostAddresses(host);
+                    socketEndPoint = new IPEndPoint(addrs[0], port);
+                    // Set hostname (if it is not already configured)
+                    socketSettings.ServerCommonName ??= host;
+                }
             }
             else
             {
@@ -121,39 +91,49 @@ namespace QuickFix
             }
 
             socketSettings.Configure(dict);
-            
 
-            AcceptorSocketDescriptor descriptor;
-            if (!socketDescriptorForAddress_.TryGetValue(socketEndPoint, out descriptor))
+            if (!_socketDescriptorForAddress.TryGetValue(socketEndPoint, out var descriptor))
             {
-                descriptor = new AcceptorSocketDescriptor(socketEndPoint, socketSettings, dict);
-                socketDescriptorForAddress_[socketEndPoint] = descriptor;
+                descriptor = new AcceptorSocketDescriptor(socketEndPoint, socketSettings, _nonSessionLog);
+                _socketDescriptorForAddress[socketEndPoint] = descriptor;
             }
 
             return descriptor;
         }
 
         /// <summary>
+        /// Checks if the host address is the "any" address in either IPv4 (0.0.0.0) or IPv6 (::)
+        /// </summary>
+        /// <param name="host"></param>
+        /// <returns></returns>
+        private static bool IsAnyIpAddress(string host)
+        {
+            return IPAddress.TryParse(host, out IPAddress? address) &&
+                   (address.Equals(IPAddress.Any) ||
+                    address.Equals(IPAddress.IPv6Any));
+        }
+
+        /// <summary>
         /// Create session, either at start-up or as an ad-hoc operation
         /// </summary>
-        /// <param name="sessionID">ID of new session</param>
+        /// <param name="sessionId">ID of new session</param>
         /// <param name="dict">config settings for new session</param>
         /// <returns>true if session added successfully, false if session already exists or is not an acceptor</returns>
-        private bool CreateSession(SessionID sessionID, Dictionary dict)
+        private bool CreateSession(SessionID sessionId, SettingsDictionary dict)
         {
-            if (!sessions_.ContainsKey(sessionID))
+            if (!_sessions.ContainsKey(sessionId))
             {
                 string connectionType = dict.GetString(SessionSettings.CONNECTION_TYPE);
                 if ("acceptor" == connectionType)
                 {
                     AcceptorSocketDescriptor descriptor = GetAcceptorSocketDescriptor(dict);
-                    Session session = sessionFactory_.Create(sessionID, dict);
+                    Session session = _sessionFactory.Create(sessionId, dict);
                     descriptor.AcceptSession(session);
-                    sessions_[sessionID] = session;
+                    _sessions[sessionId] = session;
 
                     // start SocketReactor if it was created via AddSession call
                     // and if acceptor is already started
-                    if (isStarted_ && !_disposed)
+                    if (_isStarted && !_disposed)
                     {
                         descriptor.SocketReactor.Start();
                     }
@@ -166,57 +146,52 @@ namespace QuickFix
 
         private void StartAcceptingConnections()
         {
-            lock (sync_)
+            lock (_sync)
             {
-                // FIXME StartSessionTimer();
-                foreach (AcceptorSocketDescriptor socketDescriptor in socketDescriptorForAddress_.Values)
+                foreach (AcceptorSocketDescriptor socketDescriptor in _socketDescriptorForAddress.Values)
                 {
                     socketDescriptor.SocketReactor.Start();
-                    // FIXME log_.Info("Listening for connections on " + socketDescriptor.getAddress());
                 }
             }
         }
 
         private void StopAcceptingConnections()
         {
-            lock (sync_)
+            lock (_sync)
             {
-                foreach (AcceptorSocketDescriptor socketDescriptor in socketDescriptorForAddress_.Values)
+                foreach (AcceptorSocketDescriptor socketDescriptor in _socketDescriptorForAddress.Values)
                 {
                     socketDescriptor.SocketReactor.Shutdown();
-                    // FIXME log_.Info("No longer accepting connections on " + socketDescriptor.getAddress());
                 }
             }
         }
 
         private void LogoutAllSessions(bool force)
         {
-            foreach (Session session in sessions_.Values)
+            foreach (Session session in _sessions.Values)
             {
                 try
                 {
                     session.Logout();
                 }
-                catch (System.Exception e)
+                catch (Exception e)
                 {
-                    // FIXME logError(session.getSessionID(), "Error during logout", e);
-                    System.Console.WriteLine("Error during logout of Session " + session.SessionID + ": " + e.Message);
+                    session.Log.OnEvent($"Error during logout of Session {session.SessionID}: {e.Message}");
                 }
             }
 
             if (force && IsLoggedOn)
             {
-                foreach (Session session in sessions_.Values)
+                foreach (Session session in _sessions.Values)
                 {
                     try
                     {
                         if (session.IsLoggedOn)
                             session.Disconnect("Forcibly disconnecting session");
                     }
-                    catch (System.Exception e)
+                    catch (Exception e)
                     {
-                        // FIXME logError(session.getSessionID(), "Error during disconnect", e);
-                        System.Console.WriteLine("Error during disconnect of Session " + session.SessionID + ": " + e.Message);
+                        session.Log.OnEvent($"Error during disconnect of Session {session.SessionID}: {e.Message}");
                     }
                 }
             }
@@ -226,11 +201,10 @@ namespace QuickFix
         }
 
         /// <summary>
-        /// FIXME
+        /// TODO implement WaitForLogout
         /// </summary>
         private void WaitForLogout()
         {
-            System.Console.WriteLine("TODO - ThreadedSocketAcceptor.WaitForLogout not implemented!");
             /*
             int start = System.Environment.TickCount;
             HashSet<Session> sessions = new HashSet<Session>(sessions_.Values);
@@ -261,7 +235,7 @@ namespace QuickFix
 
         private void DisposeSessions()
         {
-            foreach (var session in sessions_.Values)
+            foreach (var session in _sessions.Values)
             {
                 session.Dispose();
             }
@@ -276,12 +250,12 @@ namespace QuickFix
             if (_disposed)
                 throw new ObjectDisposedException(GetType().Name);
 
-            lock (sync_)
+            lock (_sync)
             {
-                if (!isStarted_)
+                if (!_isStarted)
                 {
                     StartAcceptingConnections();
-                    isStarted_ = true;
+                    _isStarted = true;
                 }
             }
         }
@@ -299,7 +273,9 @@ namespace QuickFix
             StopAcceptingConnections();
             LogoutAllSessions(force);
             DisposeSessions();
-            sessions_.Clear();
+            _sessions.Clear();
+            _nonSessionLog.Dispose();
+            _isStarted = false;
 
             // FIXME StopSessionTimer();
             // FIXME Session.UnregisterSessions(GetSessions());
@@ -313,7 +289,7 @@ namespace QuickFix
         {
             get
             {
-                return sessions_.Values.Any(session => session.IsLoggedOn);
+                return _sessions.Values.Any(session => session.IsLoggedOn);
             }
         }
 
@@ -323,7 +299,7 @@ namespace QuickFix
         /// <returns>the SessionIDs for the sessions managed by this acceptor</returns>
         public HashSet<SessionID> GetSessionIDs()
         {
-            return new HashSet<SessionID>(sessions_.Keys);
+            return new HashSet<SessionID>(_sessions.Keys);
         }
 
         /// <summary>
@@ -332,28 +308,28 @@ namespace QuickFix
         /// <returns></returns>
         public Dictionary<SessionID, IPEndPoint> GetAcceptorAddresses()
         {
-            throw new System.NotImplementedException();
+            throw new NotImplementedException();
         }
 
         /// <summary>
         /// Add new session as an ad-oc (dynamic) operation
         /// </summary>
-        /// <param name="sessionID">ID of new session</param>
+        /// <param name="sessionId">ID of new session</param>
         /// <param name="dict">config settings for new session</param>
         /// <returns>true if session added successfully, false if session already exists or is not an acceptor</returns>
-        public bool AddSession(SessionID sessionID, Dictionary dict)
+        public bool AddSession(SessionID sessionId, SettingsDictionary dict)
         {
-            lock (settings_)
-                if (!settings_.Has(sessionID)) // session won't be in settings if ad-hoc creation after startup
-                    settings_.Set(sessionID, dict); // need to to this here to merge in default config settings
+            lock (_settings)
+                if (!_settings.Has(sessionId)) // session won't be in settings if ad-hoc creation after startup
+                    _settings.Set(sessionId, dict); // need to to this here to merge in default config settings
                 else
                     return false; // session already exists
 
-            if (CreateSession(sessionID, dict))
+            if (CreateSession(sessionId, dict))
                 return true;
 
-            lock (settings_) // failed to create session, so remove from settings
-                settings_.Remove(sessionID);
+            lock (_settings) // failed to create session, so remove from settings
+                _settings.Remove(sessionId);
             return false;
         }
 
@@ -361,24 +337,23 @@ namespace QuickFix
         /// <summary>
         /// Ad-hoc removal of an existing session
         /// </summary>
-        /// <param name="sessionID">ID of session to be removed</param>
+        /// <param name="sessionId">ID of session to be removed</param>
         /// <param name="terminateActiveSession">if true, force disconnection and removal of session even if it has an active connection</param>
         /// <returns>true if session removed or not already present; false if could not be removed due to an active connection</returns>
-        public bool RemoveSession(SessionID sessionID, bool terminateActiveSession)
+        public bool RemoveSession(SessionID sessionId, bool terminateActiveSession)
         {
-            Session session = null;
-            if (sessions_.TryGetValue(sessionID, out session))
+            if (_sessions.TryGetValue(sessionId, out var session))
             {
                 if (session.IsLoggedOn && !terminateActiveSession)
                     return false;
                 session.Disconnect("Dynamic session removal");
-                foreach (AcceptorSocketDescriptor descriptor in socketDescriptorForAddress_.Values)
-                    if (descriptor.RemoveSession(sessionID))
+                foreach (AcceptorSocketDescriptor descriptor in _socketDescriptorForAddress.Values)
+                    if (descriptor.RemoveSession(sessionId))
                         break;
-                sessions_.Remove(sessionID);
+                _sessions.Remove(sessionId);
                 session.Dispose();
-                lock (settings_)
-                    settings_.Remove(sessionID);
+                lock (_settings)
+                    _settings.Remove(sessionId);
             }
             return true;
         }
@@ -390,7 +365,7 @@ namespace QuickFix
         /// Any override should call base.Dispose(disposing).
         /// </summary>
         /// <param name="disposing"></param>
-        protected virtual void Dispose(bool disposing)
+        protected void Dispose(bool disposing)
         {
             if (_disposed) return;
             if (disposing)
@@ -417,6 +392,7 @@ namespace QuickFix
             Dispose(true);
             GC.SuppressFinalize(this);
         }
+
         ~ThreadedSocketAcceptor() => Dispose(false);
     }
 }

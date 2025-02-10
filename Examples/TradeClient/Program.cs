@@ -1,7 +1,6 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
+using QuickFix.Logger;
+using QuickFix.Store;
 
 namespace TradeClient
 {
@@ -31,14 +30,9 @@ namespace TradeClient
             {
                 QuickFix.SessionSettings settings = new QuickFix.SessionSettings(file);
                 TradeClientApp application = new TradeClientApp();
-
-                QuickFix.IMessageStoreFactory storeFactory = new QuickFix.ODBCStoreFactory(settings);
-                QuickFix.ILogFactory logFactory = new QuickFix.ScreenLogFactory(settings);
-
-                //QuickFix.IMessageStoreFactory storeFactory = new QuickFix.FileStoreFactory(settings);
-                //QuickFix.ILogFactory logFactory = new QuickFix.ScreenLogFactory(settings);
-
-
+                IMessageStoreFactory storeFactory = new FileStoreFactory(settings);
+                ILogFactory logFactory = new ScreenLogFactory(settings);
+                //ILogFactory logFactory = new FileLogFactory(settings);
                 QuickFix.Transport.SocketInitiator initiator = new QuickFix.Transport.SocketInitiator(application, storeFactory, settings, logFactory);
 
                 // this is a developer-test kludge.  do not emulate.
@@ -48,7 +42,7 @@ namespace TradeClient
                 application.Run();
                 initiator.Stop();
             }
-            catch (System.Exception e)
+            catch (Exception e)
             {
                 Console.WriteLine(e.Message);
                 Console.WriteLine(e.StackTrace);

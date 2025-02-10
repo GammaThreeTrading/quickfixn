@@ -21,17 +21,9 @@ namespace QuickFix.Fields
             timePrecision = timeFormatPrecision;
         }
 
-
-        // quickfix compat
-        public DateTime getValue()
-        { return Obj; }
-
-        public void setValue(DateTime dt)
-        { Obj = dt; }
-
-        protected override string makeString()
+        protected override string MakeString()
         {
-            return Converters.DateTimeConverter.Convert(Obj, timePrecision);
+            return Converters.DateTimeConverter.ToFIX(Value, timePrecision);
         }
     }
 
@@ -47,11 +39,11 @@ namespace QuickFix.Fields
             : base(tag, dt, showMilliseconds) { }
 
         public DateOnlyField(int tag, DateTime dt, TimeStampPrecision timeFormatPrecision)
-    : base(tag, dt, timeFormatPrecision) { }
+            : base(tag, dt, timeFormatPrecision) { }
 
-        protected override string makeString()
+        protected override string MakeString()
         {
-            return Converters.DateTimeConverter.ConvertDateOnly(Obj);
+            return Converters.DateTimeConverter.ToFIXDateOnly(Value);
         }
     }
 
@@ -69,9 +61,9 @@ namespace QuickFix.Fields
         public TimeOnlyField(int tag, DateTime dt, TimeStampPrecision timeFormatPrecision)
             : base(tag, dt, timeFormatPrecision) { }
 
-        protected override string makeString()
+        protected override string MakeString()
         {
-            return Converters.DateTimeConverter.ConvertTimeOnly(Obj, base.timePrecision); 
+            return Converters.DateTimeConverter.ToFIXTimeOnly(Value, base.timePrecision);
         }
     }
 }

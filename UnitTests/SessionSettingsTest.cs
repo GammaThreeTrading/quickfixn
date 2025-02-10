@@ -1,4 +1,5 @@
 ﻿using System.IO;
+using System.Linq;
 using NUnit.Framework;
 using QuickFix;
 
@@ -7,12 +8,12 @@ namespace UnitTests
     [TestFixture]
     public class SessionSettingsTest
     {
-        protected System.Text.StringBuilder partialConfiguration;
+        private System.Text.StringBuilder _partialConfiguration = new();
 
         [SetUp]
         public void Init()
         {
-            partialConfiguration = new System.Text.StringBuilder()
+            _partialConfiguration = new System.Text.StringBuilder()
                 .AppendLine("[SESSION]")
                 .AppendLine("BeginString=FIX.4.2")
                 .AppendLine("SenderCompID=ISLD")
@@ -56,9 +57,9 @@ namespace UnitTests
                 .AppendLine("BeginString=FIX.4.0")
                 .AppendLine("Value=4")
                 .AppendLine("Empty=")
-                .AppendLine(partialConfiguration.ToString())
+                .AppendLine(_partialConfiguration.ToString())
                 .ToString();
-            SessionSettings settings = new SessionSettings(new System.IO.StringReader(configuration));
+            SessionSettings settings = new SessionSettings(new StringReader(configuration));
             
             SessionID session1 = new SessionID("FIX.4.2", "ISLD", "TW");
             SessionID session2 = new SessionID("FIX.4.1", "ISLD", "WT");
@@ -99,14 +100,14 @@ namespace UnitTests
         public void LoadSettingsWithDefaultSectionLast()
         {
             string configuration = new System.Text.StringBuilder()
-                .AppendLine(partialConfiguration.ToString())
+                .AppendLine(_partialConfiguration.ToString())
                 .AppendLine("[DEFAULT]")
                 .AppendLine("ConnectionType=initiator")
                 .AppendLine("BeginString=FIX.4.0")
                 .AppendLine("Value=4")
                 .AppendLine("Empty=")
                 .ToString();
-            SessionSettings settings = new SessionSettings(new System.IO.StringReader(configuration));
+            SessionSettings settings = new SessionSettings(new StringReader(configuration));
 
             SessionID session1 = new SessionID("FIX.4.2", "ISLD", "TW");
             SessionID session2 = new SessionID("FIX.4.1", "ISLD", "WT");
@@ -158,7 +159,7 @@ namespace UnitTests
                     .AppendLine("SenderCompID=ISLD")
                     .AppendLine("TargetCompID=TW")
                     .ToString();
-            Assert.Throws<ConfigError>(delegate { new SessionSettings(new System.IO.StringReader(configuration)); });
+            Assert.Throws<ConfigError>(delegate { new SessionSettings(new StringReader(configuration)); });
         }
         
         [Test]
@@ -175,7 +176,7 @@ namespace UnitTests
                     .AppendLine("  Double  =  1.23  ")
                     .AppendLine("  Bool  =  N  ")
                     .ToString();
-            SessionSettings settings = new SessionSettings(new System.IO.StringReader(configuration));
+            SessionSettings settings = new SessionSettings(new StringReader(configuration));
             
             Assert.That(settings.Get().GetString("ConnectionType"), Is.EqualTo("initiator"));
 
@@ -196,20 +197,20 @@ namespace UnitTests
             SessionID sessionID = new SessionID("FIX.4.2", "SenderCompID", "TargetCompID");
             
             // ConnectionType not set
-            QuickFix.Dictionary dictionary = new QuickFix.Dictionary();
-            Assert.Throws<ConfigError>(delegate { settings.Set(sessionID, dictionary); });
+            QuickFix.SettingsDictionary settingsDictionary = new QuickFix.SettingsDictionary();
+            Assert.Throws<ConfigError>(delegate { settings.Set(sessionID, settingsDictionary); });
 
             // ConnectionType set to invalid value
-            dictionary.SetString(SessionSettings.CONNECTION_TYPE, "badvalue");
-            Assert.Throws<ConfigError>(delegate { settings.Set(sessionID, dictionary); });
+            settingsDictionary.SetString(SessionSettings.CONNECTION_TYPE, "badvalue");
+            Assert.Throws<ConfigError>(delegate { settings.Set(sessionID, settingsDictionary); });
 
             // ConnectionType set to valid value
-            dictionary.SetString(SessionSettings.CONNECTION_TYPE, "initiator");
-            Assert.DoesNotThrow(delegate { settings.Set(sessionID, dictionary); });
+            settingsDictionary.SetString(SessionSettings.CONNECTION_TYPE, "initiator");
+            Assert.DoesNotThrow(delegate { settings.Set(sessionID, settingsDictionary); });
             
             // Invalid BeginString
             sessionID = new SessionID("FIX4.2", "SenderCompID", "TargetCompID");
-            Assert.Throws<ConfigError>(delegate { settings.Set(sessionID, dictionary); });
+            Assert.Throws<ConfigError>(delegate { settings.Set(sessionID, settingsDictionary); });
         }
 
         [Test]
@@ -232,13 +233,13 @@ namespace UnitTests
                 .AppendLine("TARGETCOMPID=WT")
                 .AppendLine("VALUE=2")
                 .ToString();
-            SessionSettings settings = new SessionSettings(new System.IO.StringReader(configuration));
+            SessionSettings settings = new SessionSettings(new StringReader(configuration));
 
             Assert.That(settings.ToString(), Is.EqualTo(configuration));
         }
 
         [Test]
-        public void testExtendedSettings()
+        public void TestExtendedSettings()
         {
             string settingsString = new System.Text.StringBuilder()
                 .AppendLine("[DEFAULT]")
@@ -253,14 +254,13 @@ namespace UnitTests
                 .AppendLine("TargetSubID=HedgeFund")
                 .AppendLine("TargetLocationID=NYC")
                 .AppendLine("SendRedundantResendRequests=Y")
-                .AppendLine("MillisecondsInTimeStamp=Y")
                 .AppendLine("EnableLastMsgSeqNumProcessed=Y")
                 .AppendLine("MaxMessagesInResendRequest=2500")
                 .AppendLine("StartTime=06:00:00")
                 .AppendLine("EndTime=05:59:00")
                 .ToString();
 
-            SessionSettings settings = new SessionSettings(new System.IO.StringReader(settingsString));
+            SessionSettings settings = new SessionSettings(new StringReader(settingsString));
             
             SessionID id = new SessionID("FIX.4.2", "Company", "FixedIncome", "HongKong", "CLIENT1", "HedgeFund", "NYC");
             Assert.That(settings.Get(id).GetString("HeartBtInt"), Is.EqualTo("60"));
@@ -272,18 +272,13 @@ namespace UnitTests
             Assert.That(settings.Get(id).GetString("TargetSubID"), Is.EqualTo("HedgeFund"));
             Assert.That(settings.Get(id).GetString("TargetLocationID"), Is.EqualTo("NYC"));
             Assert.That(settings.Get(id).GetString("SendRedundantResendRequests"), Is.EqualTo("Y"));
-            Assert.That(settings.Get(id).GetString("MillisecondsInTimeStamp"), Is.EqualTo("Y"));
             Assert.That(settings.Get(id).GetString("EnableLastMsgSeqNumProcessed"), Is.EqualTo("Y"));
             Assert.That(settings.Get(id).GetString("MaxMessagesInResendRequest"), Is.EqualTo("2500"));
             Assert.That(settings.Get(id).GetString("StartTime"), Is.EqualTo("06:00:00"));
             Assert.That(settings.Get(id).GetString("EndTime"), Is.EqualTo("05:59:00"));
-            id = null;
-            foreach(SessionID sid in settings.GetSessions())
-            {
-                id = sid;
-                break;
-            }
-            Assert.NotNull(id);
+
+            id = settings.GetSessions().First();
+            Assert.That(id, Is.Not.Null);
             Assert.That(id.BeginString, Is.EqualTo("FIX.4.2"));
             Assert.That(id.SenderCompID, Is.EqualTo("Company"));
             Assert.That(id.SenderSubID, Is.EqualTo("FixedIncome"));
@@ -312,7 +307,7 @@ ConnectionType=initiator
 BeginString=FIX.4.2
 SenderCompID=ISLD
 TargetCompID=TW";
-            SessionSettings settings = new SessionSettings(new System.IO.StringReader(configuration));
+            SessionSettings settings = new SessionSettings(new StringReader(configuration));
 
             Assert.That(settings.Get().GetString("ConnectionType"), Is.EqualTo("initiator"));
 

@@ -4,23 +4,23 @@ using System;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using QuickFix.Logger;
 
 namespace UnitTests
 {
     [TestFixture]
     public class ThreadedSocketReactorTests
     {
-        static readonly Random _random = new Random();
-        static TcpListener _tcpListener;
+        static TcpListener? _tcpListener;
 
         private int OccupyAPort()
         {
-            int randomPort;
+            Random random = new();
             for (int i = 0; i < 10; i++)
             {
                 try
                 {
-                    randomPort = _random.Next(5000, 6000);
+                    int randomPort = random.Next(5000, 6000);
                     _tcpListener = new TcpListener(IPAddress.Loopback, randomPort);
                     _tcpListener.Start();
                     
@@ -45,35 +45,22 @@ namespace UnitTests
             var port = OccupyAPort();
 
             var settings = new SocketSettings();
-            var testingObject = new ThreadedSocketReactor(new IPEndPoint(IPAddress.Loopback, port), settings, sessionDict: null);
+            var testingObject = new ThreadedSocketReactor(
+                new IPEndPoint(IPAddress.Loopback, port),
+                settings,
+                acceptorSocketDescriptor: null,
+                new NonSessionLog(new ScreenLogFactory(true, true, true)));
 
             var stdOut = GetStdOut();
+            var ex = Assert.Throws<SocketException>(delegate { testingObject.Start(); })!;
 
-            Exception exceptionResult = null;
-            string stdOutResult = null;
-
-            try
-            {
-                testingObject.Run();
-            }
-            catch (Exception ex)
-            {
-                exceptionResult = ex;
-                stdOutResult = stdOut.ToString();
-            }
-
-            Assert.IsNotNull(exceptionResult);
-            Assert.IsNotNull(stdOutResult);
-
-            Assert.AreEqual(typeof(SocketException), exceptionResult.GetType());
-            Assert.IsTrue(stdOutResult.StartsWith("Error starting listener: "));
+            Assert.That(stdOut.ToString(), Does.StartWith("<event> Error starting listener:"));
+            Assert.That(ex.SocketErrorCode, Is.EqualTo(SocketError.AddressAlreadyInUse));
         }
 
         [TearDown]
-        public void TearDown()
-        {
-            if (_tcpListener != null)
-                _tcpListener.Stop();
+        public void TearDown() {
+            _tcpListener?.Stop();
         }
     }
 }
