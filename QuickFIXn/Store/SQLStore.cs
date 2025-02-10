@@ -126,8 +126,11 @@ namespace QuickFix
 
                             cache_.CreationTime = DateTime.SpecifyKind((DateTime)reader[0], DateTimeKind.Utc);
                             //DateTime.SpecifyKind(cache_.CreationTime.Value, DateTimeKind.Utc);
-                            cache_.NextTargetMsgSeqNum = (ulong)reader[1];
-                            cache_.NextSenderMsgSeqNum = (ulong)reader[2];
+                            var TargetSeq = reader[1];
+                            var SenderSeq = reader[2];
+
+                            cache_.NextTargetMsgSeqNum = System.Convert.ToUInt64(TargetSeq);
+                            cache_.NextSenderMsgSeqNum = System.Convert.ToUInt64(SenderSeq);
 
                         }
                     }
