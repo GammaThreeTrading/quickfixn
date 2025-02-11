@@ -254,8 +254,22 @@ namespace QuickFix
             get { return cache_.CreationTime; }
         }
 
-        public ulong NextSenderMsgSeqNum { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
-        public ulong NextTargetMsgSeqNum { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
+        public ulong NextSenderMsgSeqNum {
+            get { return cache_.NextSenderMsgSeqNum; }
+            set
+            {
+                cache_.NextSenderMsgSeqNum = value;
+                SetNextSenderMsgSeqNum(value);
+            }
+        }
+        public ulong NextTargetMsgSeqNum {
+            get => cache_.NextTargetMsgSeqNum;
+            set
+            {
+                cache_.NextTargetMsgSeqNum = value;
+                SetNextTargetMsgSeqNum(value);
+            }
+        }
 
         public DateTime GetCreationTime()
         {
