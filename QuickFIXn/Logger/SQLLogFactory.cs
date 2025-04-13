@@ -1,6 +1,7 @@
 ﻿
 
 using QuickFix.Logger;
+using System.Runtime;
 
 namespace QuickFix
 {
@@ -22,7 +23,7 @@ namespace QuickFix
 
         public ILog CreateNonSessionLog()
         {
-            throw new System.NotImplementedException();
+             return new SQLLog(settings_, new SessionID("Non", "Session", "Log"));
         }
 
         #endregion
