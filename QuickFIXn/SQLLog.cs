@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Data.Odbc;
+using System.Data.SqlClient;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
@@ -14,7 +15,7 @@ namespace QuickFix
         private string incomingBackupTable = "messages_backup_log";
         private string outgoingTable = "messages_log";
         private string outgoingBackupTable = "messages_backup_log";
-        private string eventTable = "event_log";
+        private string eventTable = string.Empty; // "event_log";  Default is empty, so we don't log events unless specified by user.
         private string eventBackupTable = "event_backup_log";
         private SessionID _sessionID;
         private string _connectionString = string.Empty;
@@ -394,11 +395,17 @@ namespace QuickFix
         {
             try
             {
+                // Check to see if we have the Event Table defined.  If not, then don't log it.
+                if (string.IsNullOrEmpty(eventTable))
+                {
+                    return;
+                }
+
                 if (s.Contains("'"))
                     s = s.Replace("'", "''");
 
                 string queryString = "INSERT INTO " + eventTable + " " + "(time, beginstring, sendercompid, targetcompid, session_qualifier, text) " + "VALUES (" +
-    "'" + ODBCHelper.DateTimeToODBCConverter(DateTime.UtcNow) + "', " +
+    "'" + DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss.fff") + "', " +
     "'" + _sessionID.BeginString + "', " +
     "'" + _sessionID.SenderCompID + "', " +
     "'" + _sessionID.TargetCompID + "', ";
@@ -414,7 +421,7 @@ namespace QuickFix
 
                 try
                 {
-                    using (var sqlConnection = new System.Data.SqlClient.SqlConnection(GetSqlConnectionString()))
+                    using (var sqlConnection = new SqlConnection(GetSqlConnectionString()))
                     {
                         using (var dbCommand = sqlConnection.CreateCommand())
                         {
@@ -439,6 +446,7 @@ namespace QuickFix
 
             //throw new NotImplementedException();
         }
+
 
         public void Dispose()
         {
