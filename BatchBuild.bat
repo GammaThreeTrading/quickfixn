@@ -28,4 +28,37 @@ copy Messages\FIX50SP2\bin\Release\net8.0\QuickFix.FIX50SP2.dll bin\ReleaseNet80
 copy Messages\FIX50SP2\bin\Release\net8.0\QuickFix.FIX50SP2.pdb bin\ReleaseNet80
 
 
+
+
+
+mkdir bin\DebugNet80
+
+copy QuickFIXN\Bin\Debug\net8.0\*.dll bin\DebugNet80
+copy QuickFIXN\Bin\Debug\net8.0\*.pdb bin\DebugNet80
+
+copy Messages\FIX40\bin\Debug\net8.0\QuickFix.FIX40.dll bin\DebugNet80
+copy Messages\FIX40\bin\Debug\net8.0\QuickFix.FIX40.pdb bin\DebugNet80
+
+copy Messages\FIX41\bin\Debug\net8.0\QuickFix.FIX41.dll bin\DebugNet80
+copy Messages\FIX41\bin\Debug\net8.0\QuickFix.FIX41.pdb bin\DebugNet80
+
+copy Messages\FIX42\bin\Debug\net8.0\QuickFix.FIX42.dll bin\DebugNet80
+copy Messages\FIX42\bin\Debug\net8.0\QuickFix.FIX42.pdb bin\DebugNet80
+
+copy Messages\FIX43\bin\Debug\net8.0\QuickFix.FIX43.dll bin\DebugNet80
+copy Messages\FIX43\bin\Debug\net8.0\QuickFix.FIX43.pdb bin\DebugNet80
+
+copy Messages\FIX44\bin\Debug\net8.0\QuickFix.FIX44.dll bin\DebugNet80
+copy Messages\FIX44\bin\Debug\net8.0\QuickFix.FIX44.pdb bin\DebugNet80
+
+copy Messages\FIX50\bin\Debug\net8.0\QuickFix.FIX50.dll bin\DebugNet80
+copy Messages\FIX50\bin\Debug\net8.0\QuickFix.FIX50.pdb bin\DebugNet80
+
+copy Messages\FIX50SP1\bin\Debug\net8.0\QuickFix.FIX50SP1.dll bin\DebugNet80
+copy Messages\FIX50SP1\bin\Debug\net8.0\QuickFix.FIX50SP1.pdb bin\DebugNet80
+
+copy Messages\FIX50SP2\bin\Debug\net8.0\QuickFix.FIX50SP2.dll bin\DebugNet80
+copy Messages\FIX50SP2\bin\Debug\net8.0\QuickFix.FIX50SP2.pdb bin\DebugNet80
+
+
 pause

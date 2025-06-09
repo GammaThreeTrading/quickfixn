@@ -23,8 +23,7 @@ namespace QuickFix
 
         public ILog CreateNonSessionLog()
         {
-            return new NullLog();
-             //return new SQLLog(settings_, new SessionID("Non", "Session", "Log"));
+            return new ScreenLog(true, true, true);
         }
 
         #endregion
