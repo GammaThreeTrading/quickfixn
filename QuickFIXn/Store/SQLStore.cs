@@ -24,6 +24,8 @@ namespace QuickFix
         private string _datasource = string.Empty;
         private string _initialcatalog = string.Empty;
 
+        private bool _ignoreHeartbeats = true;
+
         public SQLStore(SessionID sessionId, string user, string password, string connectionString, SessionSettings settings)
         {
             _sessionID = sessionId;
@@ -40,6 +42,9 @@ namespace QuickFix
 
             if (_sessionSettings.Get(_sessionID).Has(SessionSettings.SQL_STORE_INITIAL_CATALOG))
                 _initialcatalog = _sessionSettings.Get(_sessionID).GetString(SessionSettings.SQL_STORE_INITIAL_CATALOG);
+
+            if(_sessionSettings.Get(_sessionID).Has(SessionSettings.SQL_STORE_IGNORE_HEARTBEATS))
+                _ignoreHeartbeats = _sessionSettings.Get(_sessionID).GetBool(SessionSettings.SQL_STORE_IGNORE_HEARTBEATS);
 
             _connectionString = connectionString;
             _user = user;
@@ -391,6 +396,20 @@ namespace QuickFix
 
         public bool Set(ulong msgSeqNum, string msg)
         {
+            if(_ignoreHeartbeats == true)
+            {
+                try
+                {
+                    if (msg.Contains(Message.SOH + "35=0" + Message.SOH))
+                    {
+                        return true;
+                    }
+                }
+                catch (Exception)
+                {
+                    // Ignore exceptions trying to parse message
+                }
+            }
             string queryString = string.Empty;
 
             if (msg.Contains("'"))

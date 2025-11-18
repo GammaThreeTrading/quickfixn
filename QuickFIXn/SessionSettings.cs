@@ -95,6 +95,7 @@ public class SessionSettings
     public const string SQL_LOG_EVENT_TABLE = "SQLLogEventTable";
     public const string SQL_LOG_EVENT_BACKUP_TABLE = "SQLLogEventBackupTable";
     public const string SQL_STORE_SESSION_TABLE = "SQLStoreSessionTable";
+    public const string SQL_STORE_IGNORE_HEARTBEATS = "SQLStoreIgnoreHeartbeats";
     public const string SQL_STORE_MESSAGES_TABLE = "SQLStoreMessagesTable";
     public const string SQL_STORE_DATASOURCE = "SQLStoreDatasource";
     public const string SQL_STORE_INITIAL_CATALOG = "SQLStoreInitialCatalog";
