@@ -24,7 +24,7 @@ namespace QuickFix
         private string _datasource = string.Empty;
         private string _initialcatalog = string.Empty;
 
-        private bool _ignoreHeartbeats = true;
+        private bool _ignoreAdminMessages = true;
 
         public SQLStore(SessionID sessionId, string user, string password, string connectionString, SessionSettings settings)
         {
@@ -43,8 +43,8 @@ namespace QuickFix
             if (_sessionSettings.Get(_sessionID).Has(SessionSettings.SQL_STORE_INITIAL_CATALOG))
                 _initialcatalog = _sessionSettings.Get(_sessionID).GetString(SessionSettings.SQL_STORE_INITIAL_CATALOG);
 
-            if(_sessionSettings.Get(_sessionID).Has(SessionSettings.SQL_STORE_IGNORE_HEARTBEATS))
-                _ignoreHeartbeats = _sessionSettings.Get(_sessionID).GetBool(SessionSettings.SQL_STORE_IGNORE_HEARTBEATS);
+            if(_sessionSettings.Get(_sessionID).Has(SessionSettings.SQL_STORE_IGNORE_ADMIN_MESSAGES))
+                _ignoreAdminMessages = _sessionSettings.Get(_sessionID).GetBool(SessionSettings.SQL_STORE_IGNORE_ADMIN_MESSAGES);
 
             _connectionString = connectionString;
             _user = user;
@@ -396,11 +396,12 @@ namespace QuickFix
 
         public bool Set(ulong msgSeqNum, string msg)
         {
-            if(_ignoreHeartbeats == true)
+            if(_ignoreAdminMessages == true)
             {
                 try
                 {
-                    if (msg.Contains(Message.SOH + "35=0" + Message.SOH))
+                    // If the message is a admin message, ignore it
+                    if (Message.IsAdminMsgType(Message.GetMsgType(msg)))
                     {
                         return true;
                     }
