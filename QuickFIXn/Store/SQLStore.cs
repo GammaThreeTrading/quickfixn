@@ -2,22 +2,29 @@
 using QuickFix.Store;
 using System;
 using System.Collections.Generic;
-using System.Data.Odbc;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using System.Data;
+using System.Text.RegularExpressions;
 
 namespace QuickFix
 {
-    public class SQLStore : IMessageStore
+    /// <summary>
+    /// Robust, high-throughput SQLStore implementation:
+    /// - Uses "using" blocks (pooled connections) - no shared SqlConnection
+    /// - Parameterized SQL (safe + plan reuse)
+    /// - Safe quoting of table identifiers from config (prevents injection via table names)
+    /// - Optional per-instance lock for safety if store methods are invoked concurrently
+    /// - Upsert for message storage
+    /// </summary>
+    public class SQLStore : IMessageStore, IDisposable
     {
-        private MemoryStore cache_ = new MemoryStore();
+        private readonly MemoryStore cache_ = new MemoryStore();
 
-        private SessionID _sessionID;
-        private SessionSettings _sessionSettings;
+        private readonly SessionID _sessionID;
+        private readonly SessionSettings _sessionSettings;
 
         private string messages_table = "messages";
         private string sessions_table = "sessions";
+
         private string _connectionString = string.Empty;
         private string _user = string.Empty;
         private string _pwd = string.Empty;
@@ -26,10 +33,30 @@ namespace QuickFix
 
         private bool _ignoreAdminMessages = true;
 
+        // Quote-safe identifiers (computed once)
+        private readonly string _messagesTableQ;
+        private readonly string _sessionsTableQ;
+
+        // Session key fields (constant)
+        private readonly string _begin;
+        private readonly string _sender;
+        private readonly string _target;
+        private readonly string _qual; // may be empty string in your data model
+
+        // Safety: If QuickFIXn ever calls store concurrently, this avoids cache / seqnum races.
+        private readonly object _storeLock = new();
+
+        private static readonly Regex SafeIdentifier = new(@"^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.Compiled);
+
         public SQLStore(SessionID sessionId, string user, string password, string connectionString, SessionSettings settings)
         {
-            _sessionID = sessionId;
-            _sessionSettings = settings;
+            _sessionID = sessionId ?? throw new ArgumentNullException(nameof(sessionId));
+            _sessionSettings = settings ?? throw new ArgumentNullException(nameof(settings));
+
+            _begin = _sessionID.BeginString;
+            _sender = _sessionID.SenderCompID;
+            _target = _sessionID.TargetCompID;
+            _qual = _sessionID.SessionQualifier ?? string.Empty;
 
             if (_sessionSettings.Get(_sessionID).Has(SessionSettings.SQL_STORE_SESSION_TABLE))
                 sessions_table = _sessionSettings.Get(_sessionID).GetString(SessionSettings.SQL_STORE_SESSION_TABLE);
@@ -43,84 +70,92 @@ namespace QuickFix
             if (_sessionSettings.Get(_sessionID).Has(SessionSettings.SQL_STORE_INITIAL_CATALOG))
                 _initialcatalog = _sessionSettings.Get(_sessionID).GetString(SessionSettings.SQL_STORE_INITIAL_CATALOG);
 
-            if(_sessionSettings.Get(_sessionID).Has(SessionSettings.SQL_STORE_IGNORE_ADMIN_MESSAGES))
+            if (_sessionSettings.Get(_sessionID).Has(SessionSettings.SQL_STORE_IGNORE_ADMIN_MESSAGES))
                 _ignoreAdminMessages = _sessionSettings.Get(_sessionID).GetBool(SessionSettings.SQL_STORE_IGNORE_ADMIN_MESSAGES);
 
-            _connectionString = connectionString;
-            _user = user;
-            _pwd = password;
+            _connectionString = connectionString ?? string.Empty;
+            _user = user ?? string.Empty;
+            _pwd = password ?? string.Empty;
+
+            _sessionsTableQ = QuoteName(sessions_table);
+            _messagesTableQ = QuoteName(messages_table);
 
             PopulateCache();
         }
 
-        /// <summary>  
-        /// You must edit the four 'my' string values.  
-        /// </summary>  
-        /// <returns>An ADO.NET connection string.</returns>  
+        public void Dispose()
+        {
+            // Nothing to dispose because we use pooled connections per call
+        }
+
+        // ---------------------------
+        // Connection string builder
+        // ---------------------------
+
         private string GetSqlConnectionString()
         {
-            // Prepare the connection string to Azure SQL Database.  
-            var sqlConnectionSB = new SqlConnectionStringBuilder();
-
+            var sb = new SqlConnectionStringBuilder();
 
             if (!string.IsNullOrEmpty(_connectionString))
             {
-                sqlConnectionSB.ConnectionString = _connectionString;
+                sb.ConnectionString = _connectionString;
             }
             else
             {
-                // Change these values to your values.  
-                sqlConnectionSB.DataSource = _datasource; // "tcp:myazuresqldbserver.database.windows.net,1433"; //["Server"]  
-                sqlConnectionSB.InitialCatalog = _initialcatalog; // "MyDatabase"; //["Database"]  
+                sb.DataSource = _datasource;
+                sb.InitialCatalog = _initialcatalog;
 
                 if (!string.IsNullOrEmpty(_user) && !string.IsNullOrEmpty(_pwd))
                 {
-                    sqlConnectionSB.UserID = _user;  // "@yourservername"  as suffix sometimes.  
-                    sqlConnectionSB.Password = _pwd;
-                    // Leave these values as they are.  
-                    sqlConnectionSB.IntegratedSecurity = false;
+                    sb.UserID = _user;
+                    sb.Password = _pwd;
+                    sb.IntegratedSecurity = false;
                 }
                 else
                 {
-                    sqlConnectionSB.IntegratedSecurity = true;
+                    sb.IntegratedSecurity = true;
                 }
-
             }
 
-            sqlConnectionSB.Encrypt = true;
-            sqlConnectionSB.ConnectTimeout = 30;
-            sqlConnectionSB.TrustServerCertificate = true;
+            // Only set defaults if not already provided
+            if (!sb.ContainsKey("Encrypt")) sb.Encrypt = true;
+            if (!sb.ContainsKey("TrustServerCertificate")) sb.TrustServerCertificate = false;
+            if (!sb.ContainsKey("Connect Timeout")) sb.ConnectTimeout = 15;
+            if (!sb.ContainsKey("ConnectRetryCount")) sb.ConnectRetryCount = 3;
+            if (!sb.ContainsKey("ConnectRetryInterval")) sb.ConnectRetryInterval = 2;
 
-            // Adjust these values if you like. (ADO.NET 4.5.1 or later.)  
-            sqlConnectionSB.ConnectRetryCount = 5;
-            sqlConnectionSB.ConnectRetryInterval = 5;  // Seconds.  
+            if (!sb.ContainsKey("Application Name")) sb.ApplicationName = "QuickFIXn-SQLStore";
 
-
-            return sqlConnectionSB.ToString();
+            return sb.ToString();
         }
 
+        // ---------------------------
+        // Cache/session bootstrap
+        // ---------------------------
 
         public void PopulateCache()
         {
-            string queryString = string.Empty;
-
-            queryString = "SELECT creation_time, incoming_seqnum, outgoing_seqnum FROM " + sessions_table + " WHERE " +
-                "beginstring=" + "'" + _sessionID.BeginString + "' and " +
-                "sendercompid=" + "'" + _sessionID.SenderCompID + "' and " +
-                "targetcompid=" + "'" + _sessionID.TargetCompID + "' and " +
-                "session_qualifier=" + "'" + _sessionID.SessionQualifier + "'";
-
-
-
-            using (var sqlConnection = new SqlConnection(GetSqlConnectionString()))
+            lock (_storeLock)
             {
-                using (var dbCommand = sqlConnection.CreateCommand())
-                {
-                    dbCommand.CommandText = queryString;
+                using var conn = new SqlConnection(GetSqlConnectionString());
+                conn.Open();
 
-                    sqlConnection.Open();
-                    var reader = dbCommand.ExecuteReader();
+                // Load session row (creation_time, incoming_seqnum, outgoing_seqnum)
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = $@"
+SELECT creation_time, incoming_seqnum, outgoing_seqnum
+FROM {_sessionsTableQ}
+WHERE beginstring = @begin
+  AND sendercompid = @sender
+  AND targetcompid = @target
+  AND session_qualifier = @qual;";
+
+                    AddSessionKeyParams(cmd);
+
+                    using var reader = cmd.ExecuteReader();
                     int rows = 0;
+
                     if (reader.HasRows)
                     {
                         while (reader.Read())
@@ -129,343 +164,355 @@ namespace QuickFix
                             if (rows > 1)
                                 throw new ConfigError("Multiple entries found for session in database");
 
-                            cache_.CreationTime = DateTime.SpecifyKind((DateTime)reader[0], DateTimeKind.Utc);
-                            //DateTime.SpecifyKind(cache_.CreationTime.Value, DateTimeKind.Utc);
-                            var TargetSeq = reader[1];
-                            var SenderSeq = reader[2];
+                            cache_.CreationTime = DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc);
 
-                            cache_.NextTargetMsgSeqNum = System.Convert.ToUInt64(TargetSeq);
-                            cache_.NextSenderMsgSeqNum = System.Convert.ToUInt64(SenderSeq);
-
+                            // These are typically bigint in QuickFIX stores; your existing code converts loosely.
+                            cache_.NextTargetMsgSeqNum = Convert.ToUInt64(reader.GetValue(1)); // incoming_seqnum
+                            cache_.NextSenderMsgSeqNum = Convert.ToUInt64(reader.GetValue(2)); // outgoing_seqnum
                         }
-                    }
-                    else
-                    {
-                        DateTime createTime = cache_.CreationTime.HasValue ? cache_.CreationTime.Value : DateTime.UtcNow;
-                        string insertQuery = "INSERT INTO " + sessions_table + " (beginstring, sendercompid, targetcompid, session_qualifier," +
-                            "creation_time, incoming_seqnum, outgoing_seqnum) VALUES(" +
-                            "'" + _sessionID.BeginString + "'," +
-                            "'" + _sessionID.SenderCompID + "'," +
-                            "'" + _sessionID.TargetCompID + "'," +
-                            "'" + _sessionID.SessionQualifier + "'," +
-                            "{ts '" + createTime.ToString("yyyy-MM-dd HH:mm:ss.fff") + "'}," +
-                            cache_.NextTargetMsgSeqNum + "," +
-                            cache_.NextSenderMsgSeqNum + ")";
-
-                        SqlCommand cmdInsert = sqlConnection.CreateCommand();
-                        cmdInsert.CommandText = insertQuery;
-
-                        if (0 == cmdInsert.ExecuteNonQuery())
-                            throw new ConfigError("Unable to create session in database");
+                        return;
                     }
                 }
-            }
-        }
 
+                // If not found: create it
+                var createTime = cache_.CreationTime.HasValue ? cache_.CreationTime.Value : DateTime.UtcNow;
 
-        public ulong GetNextSenderMsgSeqNum()
-        {
-            return cache_.NextSenderMsgSeqNum;
-        }
-
-        public ulong GetNextTargetMsgSeqNum()
-        {
-            return cache_.NextTargetMsgSeqNum;
-        }
-
-        public void SetNextSenderMsgSeqNum(ulong value)
-        {
-            string queryString = string.Empty;
-
-            queryString = queryString + "UPDATE " + sessions_table + " SET outgoing_seqnum=" + value.ToString() + " WHERE " +
-                "beginstring=" + "'" + _sessionID.BeginString + "' and " +
-                "sendercompid=" + "'" + _sessionID.SenderCompID + "' and " +
-                "targetcompid=" + "'" + _sessionID.TargetCompID + "' and " +
-                "session_qualifier=" + "'" + _sessionID.SessionQualifier + "'";
-
-            try
-            {
-                using (var sqlConnection = new SqlConnection(GetSqlConnectionString()))
+                using (var cmdInsert = conn.CreateCommand())
                 {
-                    using (var dbCommand = sqlConnection.CreateCommand())
-                    {
-                        dbCommand.CommandText = queryString;
+                    cmdInsert.CommandText = $@"
+INSERT INTO {_sessionsTableQ}
+(beginstring, sendercompid, targetcompid, session_qualifier, creation_time, incoming_seqnum, outgoing_seqnum)
+VALUES
+(@begin, @sender, @target, @qual, @creation_time, @incoming_seqnum, @outgoing_seqnum);";
 
-                        sqlConnection.Open();
-                        var rowsAffected = dbCommand.ExecuteNonQuery();
-                        cache_.NextSenderMsgSeqNum = value;
-                    }
-                }
+                    AddSessionKeyParams(cmdInsert);
+                    cmdInsert.Parameters.Add("@creation_time", SqlDbType.DateTime2).Value = createTime;
+                    cmdInsert.Parameters.Add("@incoming_seqnum", SqlDbType.BigInt).Value = (long)cache_.NextTargetMsgSeqNum;
+                    cmdInsert.Parameters.Add("@outgoing_seqnum", SqlDbType.BigInt).Value = (long)cache_.NextSenderMsgSeqNum;
 
-            }
-            catch (Exception ex)
-            {
-                Console.Write("SetNextSenderMsgSeqNum: ");
-                Console.WriteLine(ex.ToString());
-            }
-
-        }
-
-        public void SetNextTargetMsgSeqNum(ulong value)
-        {
-
-            string queryString = string.Empty;
-
-
-            queryString = queryString + "UPDATE " + sessions_table + " SET incoming_seqnum=" + value.ToString() + " WHERE " +
-                "beginstring=" + "'" + _sessionID.BeginString + "' and " +
-                "sendercompid=" + "'" + _sessionID.SenderCompID + "' and " +
-                "targetcompid=" + "'" + _sessionID.TargetCompID + "' and " +
-                "session_qualifier=" + "'" + _sessionID.SessionQualifier + "'";
-
-
-            try
-            {
-                using (var sqlConnection = new SqlConnection(GetSqlConnectionString()))
-                {
-                    using (var dbCommand = sqlConnection.CreateCommand())
-                    {
-                        dbCommand.CommandText = queryString;
-
-                        sqlConnection.Open();
-                        var rowsAffected = dbCommand.ExecuteNonQuery();
-                        cache_.NextTargetMsgSeqNum = value;
-                    }
-                }
-
-            }
-            catch (Exception ex)
-            {
-                Console.Write("SetNextTargetMsgSeqNum: ");
-                Console.WriteLine(ex.ToString());
-            }
-
-        }
-
-        public void IncrNextSenderMsgSeqNum()
-        {
-            cache_.IncrNextSenderMsgSeqNum();
-            SetNextSenderMsgSeqNum(cache_.NextSenderMsgSeqNum);
-        }
-
-        public void IncrNextTargetMsgSeqNum()
-        {
-            cache_.IncrNextTargetMsgSeqNum();
-            SetNextTargetMsgSeqNum(cache_.NextTargetMsgSeqNum);
-        }
-
-        public DateTime? CreationTime
-        {
-            get { return cache_.CreationTime; }
-        }
-
-        public ulong NextSenderMsgSeqNum {
-            get { return cache_.NextSenderMsgSeqNum; }
-            set
-            {
-                cache_.NextSenderMsgSeqNum = value;
-                SetNextSenderMsgSeqNum(value);
-            }
-        }
-        public ulong NextTargetMsgSeqNum {
-            get => cache_.NextTargetMsgSeqNum;
-            set
-            {
-                cache_.NextTargetMsgSeqNum = value;
-                SetNextTargetMsgSeqNum(value);
-            }
-        }
-
-        public DateTime GetCreationTime()
-        {
-            return cache_.CreationTime.Value;
-        }
-
-        public void Reset()
-        {
-            string queryString = string.Empty;
-
-            queryString = queryString + "DELETE from " + messages_table + " WHERE " +
-                "beginstring=" + "'" + _sessionID.BeginString + "' and " +
-                "sendercompid=" + "'" + _sessionID.SenderCompID + "' and " +
-                "targetcompid=" + "'" + _sessionID.TargetCompID + "' and " +
-                "session_qualifier=" + "'" + _sessionID.SessionQualifier + "'";
-
-            try
-            {
-                using (var sqlConnection = new SqlConnection(GetSqlConnectionString()))
-                {
-                    using (var dbCommand = sqlConnection.CreateCommand())
-                    {
-                        dbCommand.CommandText = queryString;
-
-                        sqlConnection.Open();
-                        var rowsAffected = dbCommand.ExecuteNonQuery();
-
-                    }
+                    var rows = cmdInsert.ExecuteNonQuery();
+                    if (rows == 0)
+                        throw new ConfigError("Unable to create session in database");
                 }
             }
-            catch (Exception ex)
-            {
-                Console.Write("Reset: ");
-                Console.WriteLine(ex.ToString());
-            }
-
-
-
-
-
-            cache_.Reset();
-            DateTime? time = cache_.CreationTime;
-
-            string sqlTime = time.Value.ToString("yyyy-MM-dd HH:mm:ss.fff");
-
-            queryString = "UPDATE " + sessions_table + " SET creation_time={ts '" + sqlTime + "'}, " +
-                 "incoming_seqnum=" + cache_.NextTargetMsgSeqNum + ", "
-                + "outgoing_seqnum=" + cache_.NextSenderMsgSeqNum + " WHERE "
-                + "beginstring=" + "'" + _sessionID.BeginString + "' and "
-                + "sendercompid=" + "'" + _sessionID.SenderCompID + "' and "
-                + "targetcompid=" + "'" + _sessionID.TargetCompID + "' and "
-                + "session_qualifier=" + "'" + _sessionID.SessionQualifier + "'";
-
-            try
-            {
-                using (var sqlConnection = new SqlConnection(GetSqlConnectionString()))
-                {
-                    using (var dbCommand = sqlConnection.CreateCommand())
-                    {
-                        dbCommand.CommandText = queryString;
-
-                        sqlConnection.Open();
-                        var rowsAffected = dbCommand.ExecuteNonQuery();
-
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.Write("Reset update session table: ");
-                Console.WriteLine(ex.ToString());
-            }
-
         }
 
         public void Refresh()
         {
-            cache_.Reset();
-            PopulateCache();
+            lock (_storeLock)
+            {
+                cache_.Reset();
+                PopulateCache();
+            }
         }
 
-        public void Dispose()
+        // ---------------------------
+        // IMessageStore: seqnums
+        // ---------------------------
+
+        public ulong GetNextSenderMsgSeqNum() => cache_.NextSenderMsgSeqNum;
+        public ulong GetNextTargetMsgSeqNum() => cache_.NextTargetMsgSeqNum;
+
+        public void SetNextSenderMsgSeqNum(ulong value)
         {
+            lock (_storeLock)
+            {
+                try
+                {
+                    using var conn = new SqlConnection(GetSqlConnectionString());
+                    conn.Open();
 
+                    using var cmd = conn.CreateCommand();
+                    cmd.CommandText = $@"
+UPDATE {_sessionsTableQ}
+SET outgoing_seqnum = @value
+WHERE beginstring = @begin
+  AND sendercompid = @sender
+  AND targetcompid = @target
+  AND session_qualifier = @qual;";
+
+                    cmd.Parameters.Add("@value", SqlDbType.BigInt).Value = (long)value;
+                    AddSessionKeyParams(cmd);
+
+                    cmd.ExecuteNonQuery();
+                    cache_.NextSenderMsgSeqNum = value;
+                }
+                catch (Exception ex)
+                {
+                    Console.Write("SetNextSenderMsgSeqNum: ");
+                    Console.WriteLine(ex);
+                }
+            }
         }
+
+        public void SetNextTargetMsgSeqNum(ulong value)
+        {
+            lock (_storeLock)
+            {
+                try
+                {
+                    using var conn = new SqlConnection(GetSqlConnectionString());
+                    conn.Open();
+
+                    using var cmd = conn.CreateCommand();
+                    cmd.CommandText = $@"
+UPDATE {_sessionsTableQ}
+SET incoming_seqnum = @value
+WHERE beginstring = @begin
+  AND sendercompid = @sender
+  AND targetcompid = @target
+  AND session_qualifier = @qual;";
+
+                    cmd.Parameters.Add("@value", SqlDbType.BigInt).Value = (long)value;
+                    AddSessionKeyParams(cmd);
+
+                    cmd.ExecuteNonQuery();
+                    cache_.NextTargetMsgSeqNum = value;
+                }
+                catch (Exception ex)
+                {
+                    Console.Write("SetNextTargetMsgSeqNum: ");
+                    Console.WriteLine(ex);
+                }
+            }
+        }
+
+        public void IncrNextSenderMsgSeqNum()
+        {
+            lock (_storeLock)
+            {
+                cache_.IncrNextSenderMsgSeqNum();
+                SetNextSenderMsgSeqNum(cache_.NextSenderMsgSeqNum);
+            }
+        }
+
+        public void IncrNextTargetMsgSeqNum()
+        {
+            lock (_storeLock)
+            {
+                cache_.IncrNextTargetMsgSeqNum();
+                SetNextTargetMsgSeqNum(cache_.NextTargetMsgSeqNum);
+            }
+        }
+
+        public DateTime? CreationTime => cache_.CreationTime;
+
+        public ulong NextSenderMsgSeqNum
+        {
+            get => cache_.NextSenderMsgSeqNum;
+            set
+            {
+                lock (_storeLock)
+                {
+                    cache_.NextSenderMsgSeqNum = value;
+                    SetNextSenderMsgSeqNum(value);
+                }
+            }
+        }
+
+        public ulong NextTargetMsgSeqNum
+        {
+            get => cache_.NextTargetMsgSeqNum;
+            set
+            {
+                lock (_storeLock)
+                {
+                    cache_.NextTargetMsgSeqNum = value;
+                    SetNextTargetMsgSeqNum(value);
+                }
+            }
+        }
+
+        public DateTime GetCreationTime() => cache_.CreationTime!.Value;
+
+        // ---------------------------
+        // IMessageStore: messages
+        // ---------------------------
 
         public void Get(ulong startSeqNum, ulong endSeqNum, List<string> messages)
         {
-            string queryString = string.Empty;
+            if (messages == null) throw new ArgumentNullException(nameof(messages));
 
-
-            queryString = queryString + "SELECT message FROM " + messages_table + " WHERE " +
-                "beginstring=" + "'" + _sessionID.BeginString + "' and " +
-                "sendercompid=" + "'" + _sessionID.SenderCompID + "' and " +
-                "targetcompid=" + "'" + _sessionID.TargetCompID + "' and " +
-                "session_qualifier=" + "'" + _sessionID.SessionQualifier + "' and " +
-                "msgseqnum >=" + startSeqNum.ToString() + " and " + "msgseqnum<=" + endSeqNum.ToString() + " " +
-                "ORDER BY msgseqnum";
-
-
-            using (var sqlConnection = new SqlConnection(GetSqlConnectionString()))
+            lock (_storeLock)
             {
-                using (var dbCommand = sqlConnection.CreateCommand())
-                {
-                    dbCommand.CommandText = queryString;
+                using var conn = new SqlConnection(GetSqlConnectionString());
+                conn.Open();
 
-                    sqlConnection.Open();
-                    var reader = dbCommand.ExecuteReader();
-                    if (reader.HasRows)
-                    {
-                        while (reader.Read())
-                        {
-                            messages.Add(reader[0].ToString());
-                        }
-                    }
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = $@"
+SELECT message
+FROM {_messagesTableQ}
+WHERE beginstring = @begin
+  AND sendercompid = @sender
+  AND targetcompid = @target
+  AND session_qualifier = @qual
+  AND msgseqnum >= @start
+  AND msgseqnum <= @end
+ORDER BY msgseqnum;";
+
+                AddSessionKeyParams(cmd);
+                cmd.Parameters.Add("@start", SqlDbType.BigInt).Value = (long)startSeqNum;
+                cmd.Parameters.Add("@end", SqlDbType.BigInt).Value = (long)endSeqNum;
+
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    messages.Add(reader.GetString(0));
                 }
             }
         }
 
         public bool Set(ulong msgSeqNum, string msg)
         {
-            if(_ignoreAdminMessages == true)
+            if (_ignoreAdminMessages)
             {
                 try
                 {
-                    // If the message is a admin message, ignore it
                     if (Message.IsAdminMsgType(Message.GetMsgType(msg)))
-                    {
                         return true;
-                    }
                 }
-                catch (Exception)
+                catch
                 {
-                    // Ignore exceptions trying to parse message
+                    // Ignore parse exceptions
                 }
             }
-            string queryString = string.Empty;
 
-            if (msg.Contains("'"))
-                msg = msg.Replace("'", "''");
-
-            queryString = "INSERT INTO " + messages_table +
-                " (beginstring, sendercompid, targetcompid, session_qualifier, msgseqnum, message) " +
-                "VALUES (" +
-
-                "'" + _sessionID.BeginString + "'," +
-                "'" + _sessionID.SenderCompID + "'," +
-                "'" + _sessionID.TargetCompID + "'," +
-                "'" + _sessionID.SessionQualifier + "'," +
-                msgSeqNum.ToString() + "," +
-                "'" + msg + "')";
-
-
-
-            try
+            lock (_storeLock)
             {
-                // Try to insert.  If it fails, try to UPDATE message:
-                using (var sqlConnection = new SqlConnection(GetSqlConnectionString()))
+                try
                 {
-                    using (var dbCommand = sqlConnection.CreateCommand())
+                    using var conn = new SqlConnection(GetSqlConnectionString());
+                    conn.Open();
+
+                    // Fast upsert: update first, insert if not found (single round-trip)
+                    using var cmd = conn.CreateCommand();
+                    cmd.CommandText = $@"
+UPDATE {_messagesTableQ}
+SET message = @message
+WHERE beginstring = @begin
+  AND sendercompid = @sender
+  AND targetcompid = @target
+  AND session_qualifier = @qual
+  AND msgseqnum = @seq;
+
+IF @@ROWCOUNT = 0
+BEGIN
+    INSERT INTO {_messagesTableQ}
+    (beginstring, sendercompid, targetcompid, session_qualifier, msgseqnum, message)
+    VALUES
+    (@begin, @sender, @target, @qual, @seq, @message);
+END";
+
+                    AddSessionKeyParams(cmd);
+                    cmd.Parameters.Add("@seq", SqlDbType.BigInt).Value = (long)msgSeqNum;
+                    cmd.Parameters.Add("@message", SqlDbType.NVarChar, -1).Value = msg ?? string.Empty;
+
+                    cmd.ExecuteNonQuery();
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    Console.Write("Set: ");
+                    Console.WriteLine(ex);
+                    return false;
+                }
+            }
+        }
+
+        public void Reset()
+        {
+            lock (_storeLock)
+            {
+                try
+                {
+                    using var conn = new SqlConnection(GetSqlConnectionString());
+                    conn.Open();
+
+                    // Delete messages for this session
+                    using (var cmdDel = conn.CreateCommand())
                     {
-                        dbCommand.CommandText = queryString;
-                        sqlConnection.Open();
+                        cmdDel.CommandText = $@"
+DELETE FROM {_messagesTableQ}
+WHERE beginstring = @begin
+  AND sendercompid = @sender
+  AND targetcompid = @target
+  AND session_qualifier = @qual;";
 
-                        if (0 == dbCommand.ExecuteNonQuery())
-                        {
-                            string updateQuery = string.Empty;
+                        AddSessionKeyParams(cmdDel);
+                        cmdDel.ExecuteNonQuery();
+                    }
 
+                    cache_.Reset();
+                    var time = cache_.CreationTime ?? DateTime.UtcNow;
 
-                            updateQuery = "UDPATE " + messages_table + " SET message='" + msg + "' WHERE " +
-                                "beginstring=" + "'" + _sessionID.BeginString + "' and " +
-                                "sendercompid=" + "'" + _sessionID.SenderCompID + "' and " +
-                                "targetcompid=" + "'" + _sessionID.TargetCompID + "' and " +
-                                "session_qualifier=" + "'" + _sessionID.SessionQualifier + "' and " +
-                                "msgseqnum=" + msgSeqNum.ToString();
+                    // Update session row
+                    using (var cmdUpd = conn.CreateCommand())
+                    {
+                        cmdUpd.CommandText = $@"
+UPDATE {_sessionsTableQ}
+SET creation_time = @creation_time,
+    incoming_seqnum = @incoming,
+    outgoing_seqnum = @outgoing
+WHERE beginstring = @begin
+  AND sendercompid = @sender
+  AND targetcompid = @target
+  AND session_qualifier = @qual;";
 
-                            SqlCommand cmdUpdate = sqlConnection.CreateCommand();
-                            cmdUpdate.CommandText = updateQuery;
-                            cmdUpdate.ExecuteNonQuery();
-                        }
+                        AddSessionKeyParams(cmdUpd);
+                        cmdUpd.Parameters.Add("@creation_time", SqlDbType.DateTime2).Value = time;
+                        cmdUpd.Parameters.Add("@incoming", SqlDbType.BigInt).Value = (long)cache_.NextTargetMsgSeqNum;
+                        cmdUpd.Parameters.Add("@outgoing", SqlDbType.BigInt).Value = (long)cache_.NextSenderMsgSeqNum;
+
+                        cmdUpd.ExecuteNonQuery();
                     }
                 }
-
+                catch (Exception ex)
+                {
+                    Console.Write("Reset: ");
+                    Console.WriteLine(ex);
+                }
             }
-            catch (Exception ex)
+        }
+
+        // ---------------------------
+        // Helpers
+        // ---------------------------
+
+        private void AddSessionKeyParams(SqlCommand cmd)
+        {
+            cmd.Parameters.Add("@begin", SqlDbType.NVarChar, 32).Value = _begin;
+            cmd.Parameters.Add("@sender", SqlDbType.NVarChar, 64).Value = _sender;
+            cmd.Parameters.Add("@target", SqlDbType.NVarChar, 64).Value = _target;
+
+            // Your schema uses varchar(64) for session_qualifier and allows NULL.
+            // Your existing code stores it as '' sometimes. We'll preserve your behavior by using empty string.
+            cmd.Parameters.Add("@qual", SqlDbType.NVarChar, 64).Value = _qual;
+        }
+
+        private static string QuoteName(string tableName)
+        {
+            if (string.IsNullOrWhiteSpace(tableName))
+                throw new ArgumentException("Table name cannot be empty.", nameof(tableName));
+
+            // Allow either "table" or "schema.table"
+            var parts = tableName.Split('.');
+            if (parts.Length == 1)
             {
-                Console.Write("Set: ");
-                Console.WriteLine(ex.ToString());
+                var t = parts[0].Trim();
+                if (!SafeIdentifier.IsMatch(t))
+                    throw new ArgumentException($"Unsafe table identifier: {tableName}");
+                return $"[dbo].[{t}]";
+            }
+            if (parts.Length == 2)
+            {
+                var schema = parts[0].Trim();
+                var t = parts[1].Trim();
+                if (!SafeIdentifier.IsMatch(schema) || !SafeIdentifier.IsMatch(t))
+                    throw new ArgumentException($"Unsafe table identifier: {tableName}");
+                return $"[{schema}].[{t}]";
             }
 
-            return true;
+            throw new ArgumentException($"Unsupported table identifier format: {tableName}");
         }
     }
 }
