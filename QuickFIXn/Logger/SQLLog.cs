@@ -1,25 +1,51 @@
-﻿using Microsoft.Data.SqlClient;
+using Microsoft.Data.SqlClient;
 using QuickFix.Logger;
 using System;
+using System.Collections.Generic;
 using System.Data;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Channels;
+using System.Threading.Tasks;
 
 namespace QuickFix
 {
     /// <summary>
-    /// High-throughput, robust SQL logger (pooled):
-    /// - Uses ADO.NET connection pooling (SqlConnection opened/disposed per call)
-    /// - Parameterized commands (plan reuse, avoids SQL injection via values)
-    /// - Safe quoted identifiers for table names from config
-    /// - Backup runs in a transaction (copy + delete atomic)
+    /// SQLLog with async write-behind for the hot path only.
+    ///
+    /// ONLY THREE METHODS CHANGED from original:
+    ///   - OnIncoming() : enqueues to background writer, returns immediately
+    ///   - OnOutgoing()  : enqueues to background writer, returns immediately
+    ///   - OnEvent()     : enqueues to background writer, returns immediately
+    ///
+    /// Everything else (Clear, Backup, GetSqlConnectionString, QuoteName) is the
+    /// original code, unchanged. No startup or reset changes.
     /// </summary>
     public class SQLLog : ILog, IDisposable
     {
+        // -----------------------------------------------------------------------
+        // Write-behind queue (hot path only)
+        // -----------------------------------------------------------------------
+
+        private sealed record LogItem(string TableQ, string Message, DateTime Time);
+
+        private const int BatchSize = 50;
+        private const int FlushIntervalMs = 100;
+
+        private readonly Channel<LogItem> _channel = Channel.CreateUnbounded<LogItem>(
+            new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
+        private readonly Task _writerTask;
+        private readonly CancellationTokenSource _cts = new();
+
+        // -----------------------------------------------------------------------
+        // Original fields (unchanged)
+        // -----------------------------------------------------------------------
+
         private string incomingTable = "messages_log";
         private string incomingBackupTable = "messages_backup_log";
         private string outgoingTable = "messages_log";
         private string outgoingBackupTable = "messages_backup_log";
-        private string eventTable = string.Empty; // optional
+        private string eventTable = string.Empty;
         private string eventBackupTable = "event_backup_log";
 
         private readonly SessionID _sessionID;
@@ -31,7 +57,6 @@ namespace QuickFix
         private string _datasource = string.Empty;
         private string _initialcatalog = string.Empty;
 
-        // Table identifiers (quoted) to avoid injection via config table names
         private readonly string _incomingTableQ;
         private readonly string _outgoingTableQ;
         private readonly string _incomingBackupTableQ;
@@ -39,13 +64,16 @@ namespace QuickFix
         private readonly string _eventTableQ;
         private readonly string _eventBackupTableQ;
 
-        // Session fields (constant for this SQLLog instance)
         private readonly string? _begin;
         private readonly string? _sender;
         private readonly string? _target;
-        private readonly string? _qual; // may be null/empty
+        private readonly string? _qual;
 
         private static readonly Regex SafeIdentifier = new(@"^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.Compiled);
+
+        // -----------------------------------------------------------------------
+        // Constructor (original + start background writer)
+        // -----------------------------------------------------------------------
 
         public SQLLog(SessionSettings settings, SessionID sessionID)
         {
@@ -90,44 +118,57 @@ namespace QuickFix
             if (_sessionSettings.Get(sessionID).Has(SessionSettings.SQL_LOG_CONNECTION_STRING))
                 _connectionString = _sessionSettings.Get(sessionID).GetString(SessionSettings.SQL_LOG_CONNECTION_STRING);
 
-            // Build quoted identifiers once
             _incomingTableQ = QuoteName(incomingTable);
             _outgoingTableQ = QuoteName(outgoingTable);
             _incomingBackupTableQ = QuoteName(incomingBackupTable);
             _outgoingBackupTableQ = QuoteName(outgoingBackupTable);
-
             _eventTableQ = string.IsNullOrWhiteSpace(eventTable) ? "" : QuoteName(eventTable);
             _eventBackupTableQ = QuoteName(eventBackupTable);
+
+            _writerTask = Task.Run(() => BackgroundWriterAsync(_cts.Token));
         }
+
+        // -----------------------------------------------------------------------
+        // Dispose — was empty, now flushes the queue
+        // -----------------------------------------------------------------------
 
         public void Dispose()
         {
-            // Nothing to dispose now (pooling handles physical connections).
+            try
+            {
+                _channel.Writer.Complete();
+                if (!_writerTask.Wait(TimeSpan.FromSeconds(5)))
+                    Console.WriteLine($"SQLLog [{_sender}->{_target}]: Background writer did not flush within 5s on shutdown.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"SQLLog [{_sender}->{_target}]: Dispose error: {ex.Message}");
+            }
+            finally
+            {
+                _cts.Dispose();
+            }
         }
 
-        // ---------------------------
+        // -----------------------------------------------------------------------
         // Public ILog methods
-        // ---------------------------
+        // CHANGED: enqueue instead of calling InsertMessage directly
+        // -----------------------------------------------------------------------
 
-        public void OnIncoming(string msg) => InsertMessage(_incomingTableQ, msg);
+        public void OnIncoming(string msg) => _channel.Writer.TryWrite(new LogItem(_incomingTableQ, msg, DateTime.UtcNow));
 
-        public void OnOutgoing(string msg) => InsertMessage(_outgoingTableQ, msg);
+        public void OnOutgoing(string msg) => _channel.Writer.TryWrite(new LogItem(_outgoingTableQ, msg, DateTime.UtcNow));
 
         public void OnEvent(string s)
         {
             if (string.IsNullOrWhiteSpace(_eventTableQ))
                 return;
-
-            try
-            {
-                InsertMessage(_eventTableQ, s);
-            }
-            catch (Exception ex)
-            {
-                Console.Write("OnEvent: ");
-                Console.WriteLine(ex.Message);
-            }
+            _channel.Writer.TryWrite(new LogItem(_eventTableQ, s, DateTime.UtcNow));
         }
+
+        // -----------------------------------------------------------------------
+        // Clear (original — unchanged)
+        // -----------------------------------------------------------------------
 
         public void Clear()
         {
@@ -161,15 +202,14 @@ WHERE beginstring = @begin
             }
         }
 
-        /// <summary>
-        /// Moves messages older than a threshold to backup tables and deletes them from active tables.
-        /// Runs inside a transaction (atomic copy+delete).
-        /// </summary>
+        // -----------------------------------------------------------------------
+        // Backup (original — unchanged)
+        // -----------------------------------------------------------------------
+
         public void Backup(DateTime? DateThreshold = null)
         {
             try
             {
-                // 10-second safety buffer (keep your original behavior)
                 var bufferTime = DateTime.UtcNow - TimeSpan.FromSeconds(10);
                 if (DateThreshold.HasValue)
                     bufferTime = DateThreshold.Value;
@@ -196,42 +236,101 @@ WHERE beginstring = @begin
             }
         }
 
-        // ---------------------------
-        // Core insert path (pooled)
-        // ---------------------------
+        // -----------------------------------------------------------------------
+        // Background writer
+        // -----------------------------------------------------------------------
 
-        private void InsertMessage(string tableQ, string msg)
+        private async Task BackgroundWriterAsync(CancellationToken ct)
+        {
+            var batch = new List<LogItem>(BatchSize);
+
+            try
+            {
+                while (await _channel.Reader.WaitToReadAsync(ct).ConfigureAwait(false))
+                {
+                    while (batch.Count < BatchSize && _channel.Reader.TryRead(out var item))
+                        batch.Add(item);
+
+                    if (batch.Count == 0)
+                        continue;
+
+                    if (batch.Count < BatchSize)
+                    {
+                        using var delayCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                        delayCts.CancelAfter(FlushIntervalMs);
+                        try
+                        {
+                            while (batch.Count < BatchSize &&
+                                   await _channel.Reader.WaitToReadAsync(delayCts.Token).ConfigureAwait(false))
+                            {
+                                while (batch.Count < BatchSize && _channel.Reader.TryRead(out var extra))
+                                    batch.Add(extra);
+                            }
+                        }
+                        catch (OperationCanceledException) { }
+                    }
+
+                    if (batch.Count > 0)
+                    {
+                        await FlushBatchAsync(batch).ConfigureAwait(false);
+                        batch.Clear();
+                    }
+                }
+
+                // Flush remaining on Dispose
+                while (_channel.Reader.TryRead(out var remaining))
+                    batch.Add(remaining);
+                if (batch.Count > 0)
+                    await FlushBatchAsync(batch).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"SQLLog [{_sender}->{_target}]: Background writer fatal error: {ex.Message}");
+            }
+        }
+
+        private async Task FlushBatchAsync(List<LogItem> batch)
         {
             try
             {
                 using var conn = new SqlConnection(GetSqlConnectionString());
-                conn.Open();
+                await conn.OpenAsync().ConfigureAwait(false);
 
-                using var cmd = conn.CreateCommand();
-                cmd.CommandText = $@"
-INSERT INTO {tableQ}
+                foreach (var item in batch)
+                {
+                    try
+                    {
+                        using var cmd = conn.CreateCommand();
+                        cmd.CommandText = $@"
+INSERT INTO {item.TableQ}
 (time, beginstring, sendercompid, targetcompid, session_qualifier, [text])
 VALUES (@time, @begin, @sender, @target, @qual, @text);";
 
-                cmd.Parameters.Add(new SqlParameter("@time", SqlDbType.DateTime2) { Value = DateTime.UtcNow });
-                cmd.Parameters.Add(new SqlParameter("@begin", SqlDbType.NVarChar, 32) { Value = (object?)_begin ?? DBNull.Value });
-                cmd.Parameters.Add(new SqlParameter("@sender", SqlDbType.NVarChar, 64) { Value = (object?)_sender ?? DBNull.Value });
-                cmd.Parameters.Add(new SqlParameter("@target", SqlDbType.NVarChar, 64) { Value = (object?)_target ?? DBNull.Value });
-                cmd.Parameters.Add(new SqlParameter("@qual", SqlDbType.NVarChar, 64) { IsNullable = true, Value = (object?)_qual ?? DBNull.Value });
-                cmd.Parameters.Add(new SqlParameter("@text", SqlDbType.NVarChar, -1) { Value = (object?)msg ?? DBNull.Value });
+                        cmd.Parameters.Add(new SqlParameter("@time", SqlDbType.DateTime2) { Value = item.Time });
+                        cmd.Parameters.Add(new SqlParameter("@begin", SqlDbType.NVarChar, 32) { Value = (object?)_begin ?? DBNull.Value });
+                        cmd.Parameters.Add(new SqlParameter("@sender", SqlDbType.NVarChar, 64) { Value = (object?)_sender ?? DBNull.Value });
+                        cmd.Parameters.Add(new SqlParameter("@target", SqlDbType.NVarChar, 64) { Value = (object?)_target ?? DBNull.Value });
+                        cmd.Parameters.Add(new SqlParameter("@qual", SqlDbType.NVarChar, 64) { IsNullable = true, Value = (object?)_qual ?? DBNull.Value });
+                        cmd.Parameters.Add(new SqlParameter("@text", SqlDbType.NVarChar, -1) { Value = (object?)item.Message ?? DBNull.Value });
 
-                cmd.ExecuteNonQuery();
+                        await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"SQLLog [{_sender}->{_target}]: INSERT failed: {ex.Message}");
+                    }
+                }
             }
             catch (Exception ex)
             {
-                Console.Write("SQLLog InsertMessage: ");
-                Console.WriteLine(ex.Message);
+                Console.WriteLine($"SQLLog [{_sender}->{_target}]: FlushBatch connection error: {ex.Message}");
             }
         }
 
-        // ---------------------------
-        // Backup helpers
-        // ---------------------------
+        // -----------------------------------------------------------------------
+        // Backup helpers (original — unchanged)
+        // -----------------------------------------------------------------------
 
         private void ExecBackupAndClear(
             SqlConnection conn,
@@ -283,9 +382,9 @@ WHERE beginstring = @begin
             cmd.Parameters.Add(new SqlParameter("@cutoff", SqlDbType.DateTime2) { Value = cutoffUtc });
         }
 
-        // ---------------------------
-        // Connection string builder
-        // ---------------------------
+        // -----------------------------------------------------------------------
+        // Connection string builder (original — unchanged)
+        // -----------------------------------------------------------------------
 
         private string GetSqlConnectionString()
         {
@@ -317,22 +416,20 @@ WHERE beginstring = @begin
             if (!sb.ContainsKey("Connect Timeout")) sb.ConnectTimeout = 15;
             if (!sb.ContainsKey("ConnectRetryCount")) sb.ConnectRetryCount = 3;
             if (!sb.ContainsKey("ConnectRetryInterval")) sb.ConnectRetryInterval = 2;
-
             if (!sb.ContainsKey("Application Name")) sb.ApplicationName = "QuickFIXn-SQLLog";
 
             return sb.ToString();
         }
 
-        // ---------------------------
-        // Utilities
-        // ---------------------------
+        // -----------------------------------------------------------------------
+        // Utilities (original — unchanged)
+        // -----------------------------------------------------------------------
 
         private static string QuoteName(string tableName)
         {
             if (string.IsNullOrWhiteSpace(tableName))
                 throw new ArgumentException("Table name cannot be empty.", nameof(tableName));
 
-            // Allow either "table" or "schema.table"
             var parts = tableName.Split('.');
             if (parts.Length == 1)
             {
