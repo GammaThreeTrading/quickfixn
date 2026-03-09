@@ -96,21 +96,19 @@ namespace QuickFix.Transport
 
         private void RemoveThread(SessionID sessionId)
         {
-            // We can come in here on the thread being removed, and on another thread too in the case 
-            // of dynamic session removal, so make sure we won't deadlock...
-            if (Monitor.TryEnter(_sync))
+            // Use a full lock instead of TryEnter. The original TryEnter was intended to
+            // prevent deadlock when called from SocketInitiatorThreadStart's finally block,
+            // but AbstractInitiator._sync and SocketInitiator._sync are different objects —
+            // no deadlock is possible. With TryEnter, if the lock is contended the thread
+            // is silently abandoned, leaking entries in _threads and orphaning threads
+            // over many reconnect cycles.
+            SocketInitiatorThread? thread = null;
+            lock (_sync)
             {
-                if (_threads.TryGetValue(sessionId, out var thread))
-                {
-                    try
-                    {
-                        thread.Join();
-                    }
-                    catch { }
+                if (_threads.TryGetValue(sessionId, out thread))
                     _threads.Remove(sessionId);
-                }
-                Monitor.Exit(_sync);
             }
+            try { thread?.Join(); } catch { }
         }
 
         private IPEndPoint GetNextSocketEndPoint(SessionID sessionId, SettingsDictionary settings)

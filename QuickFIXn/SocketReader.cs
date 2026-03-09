@@ -289,11 +289,16 @@ public class SocketReader : IDisposable
         if (disposing)
         {
             _readCancellationTokenSource.Cancel();
-            _readCancellationTokenSource.Dispose();
 
-            // just wait when read task will be cancelled
+            // Wait for the in-flight read task to complete BEFORE disposing the CTS.
+            // Disposing the CTS while ReadAsync is still running causes ObjectDisposedException
+            // when the task tries to access the token. This is especially likely at fast startup
+            // where connect/disconnect cycles happen in tight succession.
             _currentReadTask?.ContinueWith(_ => { }).Wait(1000);
             _currentReadTask?.Dispose();
+
+            // Now safe to dispose — no tasks are using the token anymore.
+            _readCancellationTokenSource.Dispose();
 
             _stream.Dispose();
             _tcpClient.Close();

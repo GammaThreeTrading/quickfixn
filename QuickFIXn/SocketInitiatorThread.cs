@@ -23,11 +23,14 @@ public class SocketInitiatorThread : IResponder
     private Thread? _thread;
     private readonly byte[] _readBuffer = new byte[BUF_SIZE];
     private readonly Parser _parser = new();
-    private Stream? _stream;
+    // volatile: written by Connect() on the initiator thread, read by Send() on the session thread.
+    private volatile Stream? _stream;
     private readonly CancellationTokenSource _readCancellationTokenSource = new();
     private readonly IPEndPoint _socketEndPoint;
     private readonly SocketSettings _socketSettings;
-    private bool _isDisconnectRequested = false;
+    // volatile: written by Disconnect() (any thread), read by Read() on the reader thread.
+    // Without volatile, the reader thread may cache a stale false value and never exit.
+    private volatile bool _isDisconnectRequested = false;
 
     /// <summary>
     /// Keep a task for handling async read
@@ -70,7 +73,21 @@ public class SocketInitiatorThread : IResponder
     {
         Debug.Assert(_stream == null);
 
-        _stream = SetupStream();
+        // Set up the stream first (network call)
+        var stream = SetupStream();
+
+        // Guard: if Disconnect() was called while SetupStream() was in progress,
+        // don't install the responder — the session has already moved on.
+        // Without this guard, SetResponder() installs a responder on a session that
+        // just disconnected, causing Send() to throw SocketException 10058 on a
+        // dead stream and the session never recovers.
+        if (_isDisconnectRequested)
+        {
+            stream.Close();
+            return;
+        }
+
+        _stream = stream;
         Session.SetResponder(this);
     }
 
@@ -198,12 +215,17 @@ public class SocketInitiatorThread : IResponder
     {
         _isDisconnectRequested = true;
         _readCancellationTokenSource.Cancel();
-        _readCancellationTokenSource.Dispose();
 
-        // just wait when read task will be cancelled
+        // Wait for the in-flight read task to complete BEFORE disposing the CTS.
+        // Disposing the CTS while ReadAsync is still running causes ObjectDisposedException
+        // when the task tries to access the token.
         _currentReadTask?.ContinueWith(_ => { }).Wait(1000);
         _currentReadTask?.Dispose();
         _currentReadTask = null;
+
+        // Now safe to dispose — no tasks are using the token anymore.
+        _readCancellationTokenSource.Dispose();
+
         _stream?.Close();
     }
 

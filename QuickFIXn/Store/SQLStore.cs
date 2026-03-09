@@ -455,13 +455,23 @@ ORDER BY msgseqnum;";
             // 1. Drain queued writes — Reset() is about to delete them anyway.
             while (_channel.Reader.TryRead(out _)) { }
 
-            // 2. Cancel any in-progress flush so _dbWriteLock.Wait() below returns
-            //    quickly rather than blocking under Session._sync for up to 500ms.
+            // 2. Cancel any in-progress flush AND install a pre-cancelled token so that
+            //    any background writer thread that already drained the channel into its
+            //    local batch variable cannot re-insert those rows after the DELETE below.
+            //
+            //    Race prevented:
+            //      - Writer drains channel into local batch BEFORE Reset() drains it
+            //      - Reset() drains channel (nothing left), cancels oldCts
+            //      - Writer picks up _flushCts — must see a cancelled token, not a fresh one
+            //      - Fresh token installed only AFTER _dbWriteLock is released, so writer
+            //        cannot flush stale pre-Reset() rows into a post-Reset() clean table.
             CancellationTokenSource oldCts;
             lock (_flushCtsLock)
             {
                 oldCts = _flushCts;
-                _flushCts = new CancellationTokenSource(); // fresh token for post-reset flushes
+                var preCancel = new CancellationTokenSource();
+                preCancel.Cancel(); // pre-cancelled: blocks any flush attempt during Reset()
+                _flushCts = preCancel;
             }
             oldCts.Cancel();
             oldCts.Dispose();
@@ -517,6 +527,15 @@ WHERE beginstring = @begin
             }
             finally
             {
+                // Install a fresh CTS only NOW — after the DELETE is committed and the lock
+                // is about to be released. The background writer cannot acquire _dbWriteLock
+                // until after this point, so it will always see a valid uncancelled token
+                // and will only flush messages enqueued AFTER this Reset() completes.
+                lock (_flushCtsLock)
+                {
+                    _flushCts.Dispose(); // dispose the pre-cancelled one
+                    _flushCts = new CancellationTokenSource();
+                }
                 _dbWriteLock.Release();
             }
         }
@@ -573,12 +592,11 @@ WHERE beginstring = @begin
         private async Task FlushBatchAsync(List<WriteItem> batch, CancellationToken ct)
         {
             // If ct is already cancelled before we acquire, WaitAsync throws without
-            // taking the lock — track acquisition explicitly so we only Release if we own it.
-            bool lockAcquired = false;
+            // taking the lock. The catch returns immediately, so the finally below
+            // is only ever reached when the lock was successfully acquired.
             try
             {
                 await _dbWriteLock.WaitAsync(ct).ConfigureAwait(false);
-                lockAcquired = true;
             }
             catch (OperationCanceledException)
             {
@@ -638,7 +656,6 @@ WHEN NOT MATCHED THEN
             }
             finally
             {
-                // Only release if we successfully acquired the lock above.
                 _dbWriteLock.Release();
             }
         }
