@@ -31,6 +31,9 @@ public class SocketInitiatorThread : IResponder
     // volatile: written by Disconnect() (any thread), read by Read() on the reader thread.
     // Without volatile, the reader thread may cache a stale false value and never exit.
     private volatile bool _isDisconnectRequested = false;
+    // Used by Interlocked.Exchange to ensure Disconnect() body executes only once,
+    // preventing ObjectDisposedException on the CTS from a concurrent second call.
+    private int _disconnectCalled = 0;
 
     /// <summary>
     /// Keep a task for handling async read
@@ -139,7 +142,8 @@ public class SocketInitiatorThread : IResponder
     /// <exception cref="System.Net.Sockets.SocketException">On connection reset</exception>
     protected virtual int ReadSome(byte[] buffer, int timeoutMilliseconds)
     {
-        if (_stream is null) {
+        if (_stream is null)
+        {
             throw new ApplicationException("Initiator is not connected (uninitialized stream)");
         }
 
@@ -150,7 +154,8 @@ public class SocketInitiatorThread : IResponder
             // Begin read if it is not already started
             _currentReadTask ??= _stream.ReadAsync(buffer, 0, buffer.Length, _readCancellationTokenSource.Token);
 
-            if (_currentReadTask.Wait(timeoutMilliseconds)) {
+            if (_currentReadTask.Wait(timeoutMilliseconds))
+            {
                 // Dispose/nullify currentReadTask *before* retrieving .Result.
                 //   Accessing .Result can throw an exception, so we need to reset currentReadTask
                 //   first, to set us up for the next read even if an exception is thrown.
@@ -170,19 +175,22 @@ public class SocketInitiatorThread : IResponder
         {
             _currentReadTask = null;
 
-            if (ex.InnerException is OperationCanceledException) {
-                // Nothing read 
-                return 0;
-            }
-            
-            var ioException = ex.InnerException as IOException;
-            var inner = ioException?.InnerException as SocketException;
-            if (inner is not null && inner.SocketErrorCode == SocketError.TimedOut) {
+            if (ex.InnerException is OperationCanceledException)
+            {
                 // Nothing read 
                 return 0;
             }
 
-            if (inner is not null) {
+            var ioException = ex.InnerException as IOException;
+            var inner = ioException?.InnerException as SocketException;
+            if (inner is not null && inner.SocketErrorCode == SocketError.TimedOut)
+            {
+                // Nothing read 
+                return 0;
+            }
+
+            if (inner is not null)
+            {
                 throw inner; //rethrow SocketException part (which we have exception logic for)
             }
 
@@ -202,7 +210,8 @@ public class SocketInitiatorThread : IResponder
 
     public bool Send(string data)
     {
-        if (_stream is null) {
+        if (_stream is null)
+        {
             throw new ApplicationException("Initiator is not connected (uninitialized stream)");
         }
 
@@ -214,19 +223,36 @@ public class SocketInitiatorThread : IResponder
     public void Disconnect()
     {
         _isDisconnectRequested = true;
-        _readCancellationTokenSource.Cancel();
 
-        // Wait for the in-flight read task to complete BEFORE disposing the CTS.
-        // Disposing the CTS while ReadAsync is still running causes ObjectDisposedException
-        // when the task tries to access the token.
-        _currentReadTask?.ContinueWith(_ => { }).Wait(1000);
-        _currentReadTask?.Dispose();
-        _currentReadTask = null;
+        // Guard against concurrent or repeated calls. The CTS can only be cancelled
+        // and disposed once — a second call would throw ObjectDisposedException, which
+        // previously propagated out and prevented SetDisconnected() from being called,
+        // leaving the session permanently stuck in _pending.
+        if (Interlocked.Exchange(ref _disconnectCalled, 1) != 0)
+            return;
 
-        // Now safe to dispose — no tasks are using the token anymore.
-        _readCancellationTokenSource.Dispose();
+        try
+        {
+            _readCancellationTokenSource.Cancel();
 
-        _stream?.Close();
+            // Wait for the in-flight read task to complete BEFORE disposing the CTS.
+            // Disposing the CTS while ReadAsync is still running causes ObjectDisposedException
+            // when the task tries to access the token.
+            _currentReadTask?.ContinueWith(_ => { }).Wait(1000);
+            _currentReadTask?.Dispose();
+            _currentReadTask = null;
+
+            // Now safe to dispose — no tasks are using the token anymore.
+            _readCancellationTokenSource.Dispose();
+        }
+        catch (ObjectDisposedException)
+        {
+            // CTS was already disposed — safe to continue to stream close
+        }
+        finally
+        {
+            _stream?.Close();
+        }
     }
 
     #endregion
