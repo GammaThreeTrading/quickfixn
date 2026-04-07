@@ -68,8 +68,16 @@ namespace QuickFix.Transport
             }
             finally
             {
-                t.Initiator.RemoveThread(t);
+                // SetDisconnected (AbstractInitiator._sync) must be called BEFORE RemoveThread
+                // (SocketInitiator._sync) to match the lock acquisition order in Connect() ->
+                // DoConnect() -> AddThread(). Reversing the order causes a classic lock-ordering
+                // deadlock: the OnStart reconnect loop holds AbstractInitiator._sync waiting for
+                // SocketInitiator._sync, while this finally block holds SocketInitiator._sync
+                // waiting for AbstractInitiator._sync. The original TryEnter in RemoveThread was
+                // inadvertently protecting against this — the full lock replacement in the previous
+                // patch reintroduced the deadlock.
                 t.Initiator.SetDisconnected(t.Session.SessionID);
+                t.Initiator.RemoveThread(t);
             }
         }
 
