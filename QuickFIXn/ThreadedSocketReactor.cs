@@ -1,9 +1,10 @@
-﻿using System.Collections.Generic;
+﻿using QuickFix.Logger;
+using System;
+using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
-using System;
-using QuickFix.Logger;
+using System.Threading.Tasks;
 
 namespace QuickFix
 {
@@ -203,7 +204,8 @@ namespace QuickFix
                         t.Shutdown("reactor is shutting down");
                         try
                         {
-                            if (!t.Join(ClientThreadJoinTimeoutMs))
+                            var joinTask = Task.Run(() => t.Join());
+                            if (!joinTask.Wait(ClientThreadJoinTimeoutMs))
                             {
                                 LogError($"ClientHandlerThread {t.Id} did not exit within {ClientThreadJoinTimeoutMs}ms, abandoning");
                             }

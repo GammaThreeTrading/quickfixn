@@ -281,15 +281,12 @@ namespace QuickFix
             if (_disposed)
                 throw new ObjectDisposedException(GetType().Name);
 
-            StopAcceptingConnections();
-            LogoutAllSessions(force);
-            DisposeSessions();
+            LogoutAllSessions(force);      // 1. Send Logouts while connections are still alive
+            StopAcceptingConnections();    // 2. Now kill the reactor and client handlers
+            DisposeSessions();             // 3. Dispose sessions and SQLLog
             _sessions.Clear();
             _nonSessionLog.Dispose();
             _isStarted = false;
-
-            // FIXME StopSessionTimer();
-            // FIXME Session.UnregisterSessions(GetSessions());
         }
 
         /// <summary>

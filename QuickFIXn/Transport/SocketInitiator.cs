@@ -22,7 +22,7 @@ namespace QuickFix.Transport
         private readonly Dictionary<SessionID, SocketInitiatorThread> _threads = new();
         private readonly Dictionary<SessionID, int> _sessionToHostNum = new();
         private readonly object _sync = new();
-        
+
         public SocketInitiator(
             IApplication application,
             IMessageStoreFactory storeFactory,
@@ -43,7 +43,8 @@ namespace QuickFix.Transport
                 t.Initiator.SetConnected(t.Session.SessionID);
                 t.Session.Log.OnEvent("Connection succeeded");
                 t.Session.Next();
-                while (t.Read()) {
+                while (t.Read())
+                {
                 }
 
                 if (t.Initiator.IsStopped)
@@ -81,8 +82,10 @@ namespace QuickFix.Transport
             }
         }
 
-        private static void LogThreadStartConnectionFailed(SocketInitiatorThread t, Exception e) {
-            if (t.Session.Disposed) {
+        private static void LogThreadStartConnectionFailed(SocketInitiatorThread t, Exception e)
+        {
+            if (t.Session.Disposed)
+            {
                 t.NonSessionLog.OnEvent($"Connection failed [session {t.Session.SessionID}]: {e}");
                 return;
             }
@@ -104,12 +107,6 @@ namespace QuickFix.Transport
 
         private void RemoveThread(SessionID sessionId)
         {
-            // Use a full lock instead of TryEnter. The original TryEnter was intended to
-            // prevent deadlock when called from SocketInitiatorThreadStart's finally block,
-            // but AbstractInitiator._sync and SocketInitiator._sync are different objects —
-            // no deadlock is possible. With TryEnter, if the lock is contended the thread
-            // is silently abandoned, leaking entries in _threads and orphaning threads
-            // over many reconnect cycles.
             SocketInitiatorThread? thread = null;
             lock (_sync)
             {
@@ -150,7 +147,7 @@ namespace QuickFix.Transport
         }
 
         #region Initiator Methods
-        
+
         /// <summary>
         /// handle other socket options like TCP_NO_DELAY here
         /// </summary>
@@ -166,13 +163,13 @@ namespace QuickFix.Transport
 
             // Don't know if this is required in order to handle settings in the general section
             _socketSettings.Configure(settings.Get());
-        }       
+        }
 
         protected override void OnStart()
         {
             _shutdownRequested = false;
 
-            while(!_shutdownRequested)
+            while (!_shutdownRequested)
             {
                 try
                 {
@@ -234,7 +231,8 @@ namespace QuickFix.Transport
                 t.Start();
                 AddThread(t);
             }
-            catch (Exception e) {
+            catch (Exception e)
+            {
                 session.Log.OnEvent(e.Message);
             }
         }
