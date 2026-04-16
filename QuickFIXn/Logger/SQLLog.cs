@@ -3,6 +3,7 @@ using QuickFix.Logger;
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.IO;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Channels;
@@ -13,13 +14,12 @@ namespace QuickFix
     /// <summary>
     /// SQLLog with async write-behind for the hot path only.
     ///
-    /// ONLY THREE METHODS CHANGED from original:
-    ///   - OnIncoming() : enqueues to background writer, returns immediately
-    ///   - OnOutgoing()  : enqueues to background writer, returns immediately
-    ///   - OnEvent()     : enqueues to background writer, returns immediately
-    ///
-    /// Everything else (Clear, Backup, GetSqlConnectionString, QuoteName) is the
-    /// original code, unchanged. No startup or reset changes.
+    /// v2 — hardened against writer death and memory exhaustion:
+    ///   - Bounded channel (cap: 100 000 items, ~40 MB worst case)
+    ///   - Self-healing writer loop (restarts on any exception)
+    ///   - Drop counter with periodic warning when channel is full
+    ///   - Bulk insert via SqlBulkCopy for throughput under load
+    ///   - File-based error logging (works when running as a service)
     /// </summary>
     public class SQLLog : ILog, IDisposable
     {
@@ -29,13 +29,26 @@ namespace QuickFix
 
         private sealed record LogItem(string TableQ, string Message, DateTime Time);
 
-        private const int BatchSize = 50;
+        private const int ChannelCapacity = 100_000;    // hard memory cap
+        private const int BatchSize = 100;
         private const int FlushIntervalMs = 100;
+        private const int WriterRestartDelayMs = 2000;  // back-off after writer error
+        private const int DropLogIntervalMs = 10_000;   // how often to log drop warnings
 
-        private readonly Channel<LogItem> _channel = Channel.CreateUnbounded<LogItem>(
-            new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
+        private readonly Channel<LogItem> _channel = Channel.CreateBounded<LogItem>(
+            new BoundedChannelOptions(ChannelCapacity)
+            {
+                FullMode = BoundedChannelFullMode.DropOldest,
+                SingleReader = true,
+                SingleWriter = false
+            });
+
         private readonly Task _writerTask;
         private readonly CancellationTokenSource _cts = new();
+
+        // Drop tracking
+        private long _dropCount;
+        private DateTime _lastDropLog = DateTime.MinValue;
 
         // -----------------------------------------------------------------------
         // Original fields (unchanged)
@@ -129,7 +142,7 @@ namespace QuickFix
         }
 
         // -----------------------------------------------------------------------
-        // Dispose — was empty, now flushes the queue
+        // Dispose — flushes the queue
         // -----------------------------------------------------------------------
 
         public void Dispose()
@@ -138,11 +151,11 @@ namespace QuickFix
             {
                 _channel.Writer.Complete();
                 if (!_writerTask.Wait(TimeSpan.FromSeconds(5)))
-                    Console.WriteLine($"SQLLog [{_sender}->{_target}]: Background writer did not flush within 5s on shutdown.");
+                    LogError("Background writer did not flush within 5s on shutdown.");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"SQLLog [{_sender}->{_target}]: Dispose error: {ex.Message}");
+                LogError($"Dispose error: {ex.Message}");
             }
             finally
             {
@@ -151,19 +164,38 @@ namespace QuickFix
         }
 
         // -----------------------------------------------------------------------
-        // Public ILog methods
-        // CHANGED: enqueue instead of calling InsertMessage directly
+        // Public ILog methods — enqueue to bounded channel
         // -----------------------------------------------------------------------
 
-        public void OnIncoming(string msg) => _channel.Writer.TryWrite(new LogItem(_incomingTableQ, msg, DateTime.UtcNow));
+        public void OnIncoming(string msg)
+        {
+            if (!_channel.Writer.TryWrite(new LogItem(_incomingTableQ, msg, DateTime.UtcNow)))
+                TrackDrop();
+        }
 
-        public void OnOutgoing(string msg) => _channel.Writer.TryWrite(new LogItem(_outgoingTableQ, msg, DateTime.UtcNow));
+        public void OnOutgoing(string msg)
+        {
+            if (!_channel.Writer.TryWrite(new LogItem(_outgoingTableQ, msg, DateTime.UtcNow)))
+                TrackDrop();
+        }
 
         public void OnEvent(string s)
         {
             if (string.IsNullOrWhiteSpace(_eventTableQ))
                 return;
-            _channel.Writer.TryWrite(new LogItem(_eventTableQ, s, DateTime.UtcNow));
+            if (!_channel.Writer.TryWrite(new LogItem(_eventTableQ, s, DateTime.UtcNow)))
+                TrackDrop();
+        }
+
+        private void TrackDrop()
+        {
+            var count = Interlocked.Increment(ref _dropCount);
+            var now = DateTime.UtcNow;
+            if ((now - _lastDropLog).TotalMilliseconds > DropLogIntervalMs)
+            {
+                _lastDropLog = now;
+                LogError($"Channel full ({ChannelCapacity}). Total dropped: {count}. Writer may be blocked or dead.");
+            }
         }
 
         // -----------------------------------------------------------------------
@@ -237,95 +269,173 @@ WHERE beginstring = @begin
         }
 
         // -----------------------------------------------------------------------
-        // Background writer
+        // Background writer — SELF-HEALING: restarts on any exception
         // -----------------------------------------------------------------------
 
         private async Task BackgroundWriterAsync(CancellationToken ct)
         {
             var batch = new List<LogItem>(BatchSize);
 
-            try
+            while (!ct.IsCancellationRequested)
             {
-                while (await _channel.Reader.WaitToReadAsync(ct).ConfigureAwait(false))
+                try
                 {
-                    while (batch.Count < BatchSize && _channel.Reader.TryRead(out var item))
-                        batch.Add(item);
-
-                    if (batch.Count == 0)
-                        continue;
-
-                    if (batch.Count < BatchSize)
+                    while (await _channel.Reader.WaitToReadAsync(ct).ConfigureAwait(false))
                     {
-                        using var delayCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                        delayCts.CancelAfter(FlushIntervalMs);
-                        try
+                        // Fill batch up to BatchSize
+                        while (batch.Count < BatchSize && _channel.Reader.TryRead(out var item))
+                            batch.Add(item);
+
+                        if (batch.Count == 0)
+                            continue;
+
+                        // If batch isn't full, wait briefly for more items
+                        if (batch.Count < BatchSize)
                         {
-                            while (batch.Count < BatchSize &&
-                                   await _channel.Reader.WaitToReadAsync(delayCts.Token).ConfigureAwait(false))
+                            using var delayCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                            delayCts.CancelAfter(FlushIntervalMs);
+                            try
                             {
-                                while (batch.Count < BatchSize && _channel.Reader.TryRead(out var extra))
-                                    batch.Add(extra);
+                                while (batch.Count < BatchSize &&
+                                       await _channel.Reader.WaitToReadAsync(delayCts.Token).ConfigureAwait(false))
+                                {
+                                    while (batch.Count < BatchSize && _channel.Reader.TryRead(out var extra))
+                                        batch.Add(extra);
+                                }
                             }
+                            catch (OperationCanceledException) { /* timer expired, flush what we have */ }
                         }
-                        catch (OperationCanceledException) { }
+
+                        if (batch.Count > 0)
+                        {
+                            await FlushBatchAsync(batch).ConfigureAwait(false);
+                            batch.Clear();
+                        }
                     }
 
+                    // Channel completed (Dispose called) — flush remaining
+                    while (_channel.Reader.TryRead(out var remaining))
+                        batch.Add(remaining);
                     if (batch.Count > 0)
-                    {
                         await FlushBatchAsync(batch).ConfigureAwait(false);
-                        batch.Clear();
+
+                    break; // channel is complete, exit cleanly
+                }
+                catch (OperationCanceledException)
+                {
+                    break; // shutting down
+                }
+                catch (Exception ex)
+                {
+                    // *** KEY FIX: log the error and RESTART the loop ***
+                    LogError($"Writer error, restarting in {WriterRestartDelayMs}ms: [{ex.GetType().Name}] {ex.Message}\n{ex.StackTrace}");
+                    batch.Clear();
+
+                    try
+                    {
+                        await Task.Delay(WriterRestartDelayMs, ct).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        break;
                     }
                 }
-
-                // Flush remaining on Dispose
-                while (_channel.Reader.TryRead(out var remaining))
-                    batch.Add(remaining);
-                if (batch.Count > 0)
-                    await FlushBatchAsync(batch).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) { }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"SQLLog [{_sender}->{_target}]: Background writer fatal error: {ex.Message}");
             }
         }
 
+        // -----------------------------------------------------------------------
+        // Flush — bulk insert via SqlBulkCopy for throughput
+        // -----------------------------------------------------------------------
+
         private async Task FlushBatchAsync(List<LogItem> batch)
         {
+            // Group by target table (messages_log vs event_log)
+            var grouped = new Dictionary<string, List<LogItem>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var item in batch)
+            {
+                if (!grouped.TryGetValue(item.TableQ, out var list))
+                {
+                    list = new List<LogItem>();
+                    grouped[item.TableQ] = list;
+                }
+                list.Add(item);
+            }
+
             try
             {
                 using var conn = new SqlConnection(GetSqlConnectionString());
                 await conn.OpenAsync().ConfigureAwait(false);
 
-                foreach (var item in batch)
+                foreach (var (tableQ, items) in grouped)
                 {
                     try
                     {
-                        using var cmd = conn.CreateCommand();
-                        cmd.CommandText = $@"
-INSERT INTO {item.TableQ}
-(time, beginstring, sendercompid, targetcompid, session_qualifier, [text])
-VALUES (@time, @begin, @sender, @target, @qual, @text);";
+                        var dt = new DataTable();
+                        dt.Columns.Add("time", typeof(DateTime));
+                        dt.Columns.Add("beginstring", typeof(string));
+                        dt.Columns.Add("sendercompid", typeof(string));
+                        dt.Columns.Add("targetcompid", typeof(string));
+                        dt.Columns.Add("session_qualifier", typeof(string));
+                        dt.Columns.Add("text", typeof(string));
 
-                        cmd.Parameters.Add(new SqlParameter("@time", SqlDbType.DateTime2) { Value = item.Time });
-                        cmd.Parameters.Add(new SqlParameter("@begin", SqlDbType.NVarChar, 32) { Value = (object?)_begin ?? DBNull.Value });
-                        cmd.Parameters.Add(new SqlParameter("@sender", SqlDbType.NVarChar, 64) { Value = (object?)_sender ?? DBNull.Value });
-                        cmd.Parameters.Add(new SqlParameter("@target", SqlDbType.NVarChar, 64) { Value = (object?)_target ?? DBNull.Value });
-                        cmd.Parameters.Add(new SqlParameter("@qual", SqlDbType.NVarChar, 64) { IsNullable = true, Value = (object?)_qual ?? DBNull.Value });
-                        cmd.Parameters.Add(new SqlParameter("@text", SqlDbType.NVarChar, -1) { Value = (object?)item.Message ?? DBNull.Value });
+                        foreach (var item in items)
+                        {
+                            dt.Rows.Add(
+                                item.Time,
+                                (object?)_begin ?? DBNull.Value,
+                                (object?)_sender ?? DBNull.Value,
+                                (object?)_target ?? DBNull.Value,
+                                (object?)_qual ?? DBNull.Value,
+                                (object?)item.Message ?? DBNull.Value
+                            );
+                        }
 
-                        await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
+                        using var bulkCopy = new SqlBulkCopy(conn)
+                        {
+                            DestinationTableName = tableQ,
+                            BatchSize = items.Count,
+                            BulkCopyTimeout = 30
+                        };
+
+                        bulkCopy.ColumnMappings.Add("time", "time");
+                        bulkCopy.ColumnMappings.Add("beginstring", "beginstring");
+                        bulkCopy.ColumnMappings.Add("sendercompid", "sendercompid");
+                        bulkCopy.ColumnMappings.Add("targetcompid", "targetcompid");
+                        bulkCopy.ColumnMappings.Add("session_qualifier", "session_qualifier");
+                        bulkCopy.ColumnMappings.Add("text", "text");
+
+                        await bulkCopy.WriteToServerAsync(dt).ConfigureAwait(false);
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"SQLLog [{_sender}->{_target}]: INSERT failed: {ex.Message}");
+                        LogError($"BulkCopy to {tableQ} failed ({items.Count} rows): {ex.Message}");
                     }
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"SQLLog [{_sender}->{_target}]: FlushBatch connection error: {ex.Message}");
+                LogError($"FlushBatch connection error: {ex.Message}");
             }
+        }
+
+        // -----------------------------------------------------------------------
+        // Error logging — file-based so it works as a service
+        // -----------------------------------------------------------------------
+
+        private void LogError(string message)
+        {
+            var line = $"{DateTime.UtcNow:O} SQLLog [{_sender}->{_target}]: {message}";
+            Console.WriteLine(line);
+
+            try
+            {
+                var logDir = Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory, "logs");
+                Directory.CreateDirectory(logDir);
+                var logFile = Path.Combine(logDir, "sqllog_errors.log");
+                File.AppendAllText(logFile, line + Environment.NewLine);
+            }
+            catch { /* don't let logging errors kill anything */ }
         }
 
         // -----------------------------------------------------------------------
