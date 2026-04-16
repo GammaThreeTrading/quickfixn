@@ -17,16 +17,19 @@ namespace QuickFix
     {
         public enum State { RUNNING, SHUTDOWN_REQUESTED, SHUTDOWN_COMPLETE }
 
+        private const int ClientThreadJoinTimeoutMs = 5000;
+        private const int ServerThreadJoinTimeoutMs = 10000;
+
         public State ReactorState
         {
             get { lock (_sync) { return _state; } }
         }
 
-        private readonly object _sync = new ();
+        private readonly object _sync = new();
         private State _state = State.RUNNING;
         private long _nextClientId = 0;
         private Thread? _serverThread = null;
-        private readonly Dictionary<long, ClientHandlerThread> _clientThreads = new ();
+        private readonly Dictionary<long, ClientHandlerThread> _clientThreads = new();
         private readonly TcpListener _tcpListener;
         private readonly SocketSettings _socketSettings;
         private readonly IPEndPoint _serverSocketEndPoint;
@@ -58,7 +61,7 @@ namespace QuickFix
                         {
                             _tcpListener.Start();
                         }
-                        catch(Exception e)
+                        catch (Exception e)
                         {
                             LogError("Error starting listener", e);
                             throw;
@@ -72,30 +75,39 @@ namespace QuickFix
 
         public void Shutdown()
         {
+            Thread? serverThread;
+
             lock (_sync)
             {
-                if (State.RUNNING == _state)
+                if (State.RUNNING != _state)
+                    return;
+
+                _state = State.SHUTDOWN_REQUESTED;
+                serverThread = _serverThread;
+
+                // Close the listener directly — this unblocks AcceptTcpClient()
+                // immediately by causing it to throw a SocketException.
+                // Much more reliable than the old "killer connection" trick,
+                // which could fail if loopback was blocked or the listener
+                // was bound to a non-loopback address.
+                try
                 {
-                    try
-                    {
-                        _state = State.SHUTDOWN_REQUESTED;
-                        using (TcpClient killer = new TcpClient())
-                        {
-                            try
-                            {
-                                IPEndPoint killerEndPoint =  new IPEndPoint(IPAddress.Loopback, _serverSocketEndPoint.Port);
-                                killer.Connect(killerEndPoint);
-                            }
-                            catch (Exception e)
-                            {
-                                LogError("Tried to interrupt server socket but was already closed", e);
-                            }
-                        }
-                    }
-                    catch (Exception e)
-                    {
-                        LogError("Error while closing server socket", e);
-                    }
+                    _tcpListener.Stop();
+                }
+                catch (Exception e)
+                {
+                    LogError("Error stopping listener during shutdown", e);
+                }
+            }
+
+            // Wait for the server thread OUTSIDE the lock.
+            // Run() needs to acquire _sync during ShutdownClientHandlerThreads(),
+            // so holding the lock here would deadlock.
+            if (serverThread != null)
+            {
+                if (!serverThread.Join(ServerThreadJoinTimeoutMs))
+                {
+                    LogError($"Server thread did not exit within {ServerThreadJoinTimeoutMs}ms");
                 }
             }
         }
@@ -131,16 +143,20 @@ namespace QuickFix
                         LogError("Error accepting connection", e);
                 }
             }
-            _tcpListener.Server.Close();
-            _tcpListener.Stop();
+
+            // Listener is already stopped by Shutdown(), but call these
+            // defensively in case Run() exits for another reason.
+            try { _tcpListener.Server.Close(); } catch { }
+            try { _tcpListener.Stop(); } catch { }
+
             ShutdownClientHandlerThreads();
         }
 
         internal void OnClientHandlerThreadExited(object sender, ClientHandlerThread.ExitedEventArgs e)
         {
-            lock(_sync)
+            lock (_sync)
             {
-                if(_clientThreads.TryGetValue(e.ClientHandlerThread.Id, out var t))
+                if (_clientThreads.TryGetValue(e.ClientHandlerThread.Id, out var t))
                 {
                     _clientThreads.Remove(t.Id);
                     t.Dispose();
@@ -187,11 +203,14 @@ namespace QuickFix
                         t.Shutdown("reactor is shutting down");
                         try
                         {
-                            t.Join();
+                            if (!t.Join(ClientThreadJoinTimeoutMs))
+                            {
+                                LogError($"ClientHandlerThread {t.Id} did not exit within {ClientThreadJoinTimeoutMs}ms, abandoning");
+                            }
                         }
                         catch (Exception e)
                         {
-                            LogError("Error shutting down", e);
+                            LogError("Error shutting down client handler thread", e);
                         }
                         t.Dispose();
                     }
@@ -206,7 +225,8 @@ namespace QuickFix
         /// </summary>
         /// <param name="s"></param>
         /// <param name="ex"></param>
-        private void LogError(string s, Exception? ex = null) {
+        private void LogError(string s, Exception? ex = null)
+        {
             _nonSessionLog.OnEvent(ex is null ? $"{s}" : $"{s}: {ex}");
         }
     }

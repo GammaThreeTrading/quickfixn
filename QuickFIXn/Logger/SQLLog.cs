@@ -199,7 +199,11 @@ namespace QuickFix
             if ((now - _lastDropLog).TotalMilliseconds > DropLogIntervalMs)
             {
                 _lastDropLog = now;
-                LogError($"Channel full ({ChannelCapacity}). Total dropped: {count}. Writer may be blocked or dead.");
+
+                if (_channel.Reader.Completion.IsCompleted)
+                    LogError($"Channel closed (shutting down). Message not queued. Total dropped: {count}.");
+                else
+                    LogError($"Channel full ({ChannelCapacity}). Total dropped: {count}. Writer may be blocked or dead.");
             }
         }
 

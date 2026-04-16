@@ -1,9 +1,10 @@
-﻿using System.Collections.Generic;
+﻿using QuickFix.Logger;
+using QuickFix.Store;
+using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Net;
-using System;
-using QuickFix.Logger;
-using QuickFix.Store;
+using System.Threading;
 
 namespace QuickFix
 {
@@ -200,37 +201,47 @@ namespace QuickFix
                 WaitForLogout();
         }
 
-        /// <summary>
-        /// TODO implement WaitForLogout
-        /// </summary>
         private void WaitForLogout()
         {
-            /*
-            int start = System.Environment.TickCount;
-            HashSet<Session> sessions = new HashSet<Session>(sessions_.Values);
-            while(sessions.Count > 0)
+            int startTick = Environment.TickCount;
+            var pendingSessions = new HashSet<Session>(
+                _sessions.Values.Where(s => s.IsLoggedOn));
+
+            while (pendingSessions.Count > 0)
             {
                 Thread.Sleep(100);
-                
-                int elapsed = System.Environment.TickCount - start;
-                Iterator<Session> sessionItr = loggedOnSessions.iterator();
-                while (sessionItr.hasNext())
+
+                int elapsed = Environment.TickCount - startTick;
+
+                pendingSessions.RemoveWhere(session =>
                 {
-                    Session session = sessionItr.next();
-                    if (elapsed >= session.getLogoutTimeout() * 1000L)
+                    if (!session.IsLoggedOn)
+                        return true; // logout completed, remove from wait set
+
+                    if (elapsed >= 5000) // 5 second timeout per session
                     {
-                        session.disconnect("Logout timeout, force disconnect", false);
-                        sessionItr.remove();
+                        try
+                        {
+                            session.Disconnect("Logout timeout, force disconnect");
+                        }
+                        catch (Exception ex)
+                        {
+                            session.Log.OnEvent(
+                                $"Error during forced disconnect of {session.SessionID}: {ex.Message}");
+                        }
+                        return true;
                     }
-                }
-                // Be sure we don't look forever
-                if (elapsed > 60000)
+
+                    return false;
+                });
+
+                // Safety valve: never wait more than 10 seconds total
+                if (elapsed > 10000)
                 {
-                    log.warn("Stopping session logout wait after 1 minute");
+                    _nonSessionLog.OnEvent("Stopping logout wait after 10 seconds");
                     break;
                 }
             }
-            */
         }
 
         private void DisposeSessions()
