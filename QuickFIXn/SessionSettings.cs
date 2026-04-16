@@ -101,6 +101,7 @@ public class SessionSettings
     public const string SQL_STORE_INITIAL_CATALOG = "SQLStoreInitialCatalog";
     public const string SQL_LOG_DATASOURCE = "SQLLogDatasource";
     public const string SQL_LOG_INITIAL_CATALOG = "SQLLogInitialCatalog";
+    public const string SQL_LOG_ERROR_PATH = "SQLLogErrorPath";
 
     #endregion
 

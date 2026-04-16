@@ -81,6 +81,7 @@ namespace QuickFix
         private readonly string? _sender;
         private readonly string? _target;
         private readonly string? _qual;
+        private readonly string _errorLogPath;
 
         private static readonly Regex SafeIdentifier = new(@"^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.Compiled);
 
@@ -130,6 +131,10 @@ namespace QuickFix
 
             if (_sessionSettings.Get(sessionID).Has(SessionSettings.SQL_LOG_CONNECTION_STRING))
                 _connectionString = _sessionSettings.Get(sessionID).GetString(SessionSettings.SQL_LOG_CONNECTION_STRING);
+
+            _errorLogPath = _sessionSettings.Get(sessionID).Has(SessionSettings.SQL_LOG_ERROR_PATH)
+                ? _sessionSettings.Get(sessionID).GetString(SessionSettings.SQL_LOG_ERROR_PATH)
+                : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "QuickFIXn");
 
             _incomingTableQ = QuoteName(incomingTable);
             _outgoingTableQ = QuoteName(outgoingTable);
@@ -429,10 +434,8 @@ WHERE beginstring = @begin
 
             try
             {
-                var logDir = Path.Combine(
-                    AppDomain.CurrentDomain.BaseDirectory, "logs");
-                Directory.CreateDirectory(logDir);
-                var logFile = Path.Combine(logDir, "sqllog_errors.log");
+                Directory.CreateDirectory(_errorLogPath);
+                var logFile = Path.Combine(_errorLogPath, "sqllog_errors.log");
                 File.AppendAllText(logFile, line + Environment.NewLine);
             }
             catch { /* don't let logging errors kill anything */ }
