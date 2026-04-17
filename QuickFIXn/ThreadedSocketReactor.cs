@@ -155,13 +155,27 @@ namespace QuickFix
 
         internal void OnClientHandlerThreadExited(object sender, ClientHandlerThread.ExitedEventArgs e)
         {
+            // Remove from dictionary under the lock, but dispose outside it.
+            // SslStream.Dispose() can block indefinitely on close_notify write
+            // when the underlying socket is in a half-dead state. If that dispose
+            // ran under _sync, the accept loop (which takes _sync every iteration)
+            // would deadlock and the listener would go dark until process restart.
+            // Per-instance state in ClientHandlerThread is not protected by _sync,
+            // so disposing outside the lock is safe.
+            ClientHandlerThread? t = null;
             lock (_sync)
             {
-                if (_clientThreads.TryGetValue(e.ClientHandlerThread.Id, out var t))
-                {
+                if (_clientThreads.TryGetValue(e.ClientHandlerThread.Id, out t))
                     _clientThreads.Remove(t.Id);
-                    t.Dispose();
-                }
+            }
+
+            try
+            {
+                t?.Dispose();
+            }
+            catch (Exception ex)
+            {
+                LogError($"Error disposing exited client handler thread {e.ClientHandlerThread.Id}", ex);
             }
         }
 
