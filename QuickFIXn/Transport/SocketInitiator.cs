@@ -80,17 +80,18 @@ namespace QuickFix.Transport
                 t.Initiator.SetDisconnected(t.Session.SessionID);
                 t.Initiator.RemoveThread(t);
 
-                // Diagnostic: record thread exits so we can measure how often
-                // stale-responder state is being created. IsLoggedOn=True at exit
-                // means Session.Disconnect() did NOT run — the next Connect() cycle
-                // will hit the swallowed-logout path added in the zombie-session fix.
-                // Count of IsLoggedOn=True entries here = frequency of the underlying
-                // root cause that a future Session.Disconnect-in-finally fix would eliminate.
+                // Diagnostic: only log thread exits that happened while the session
+                // still thought it was logged on. Those are the events that create
+                // stale-responder state (Session.Disconnect() did NOT run), which the
+                // zombie-session fix now tolerates on the next Connect() cycle. Healthy
+                // exits (failed reconnects, clean shutdowns) are silent — NonSessionLog
+                // keeps its "only appears when something notable happened" signal.
                 try
                 {
-                    if (!t.Session.Disposed)
+                    if (!t.Session.Disposed && t.Session.IsLoggedOn)
                         t.NonSessionLog.OnEvent(
-                            $"SocketInitiatorThread exited [session={t.Session.SessionID}, IsLoggedOn={t.Session.IsLoggedOn}]");
+                            $"SocketInitiatorThread exited while IsLoggedOn=True [session={t.Session.SessionID}] " +
+                            "- stale responder state was created; next Connect() will clear it via Session.Reset.");
                 }
                 catch { /* diagnostic only */ }
             }
