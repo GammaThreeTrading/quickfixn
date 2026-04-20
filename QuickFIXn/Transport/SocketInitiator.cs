@@ -234,6 +234,13 @@ namespace QuickFix.Transport
             catch (Exception e)
             {
                 session.Log.OnEvent(e.Message);
+                // If anything threw after SetPending() (e.g. thread creation OOM,
+                // socket settings config error), the session would be stranded in
+                // _pending forever — Connect() only iterates _disconnected, so it
+                // would never retry. Restore to _disconnected so the next reconnect
+                // cycle picks it up. SetDisconnected is idempotent when the session
+                // wasn't pending in the first place.
+                SetDisconnected(session.SessionID);
             }
         }
 
