@@ -993,8 +993,15 @@ namespace QuickFix
         /// <param name="logoutMessage">value to put in the Logout message's Text field (ignored if null/empty string)</param>
         public void Reset(string loggedReason, string? logoutMessage = null)
         {
-            if(IsLoggedOn)
-                GenerateLogout(logoutMessage);
+            if (IsLoggedOn)
+            {
+                // The responder's stream may already be disposed (e.g. socket thread died
+                // without Session.Disconnect running). Swallow send failures so we still
+                // reach Disconnect()+state.Reset() below — otherwise _responder stays stale
+                // and every subsequent reconnect attempt re-throws the same exception.
+                try { GenerateLogout(logoutMessage); }
+                catch (Exception e) { Log.OnEvent($"Reset: logout send failed (ignored): {e.Message}"); }
+            }
             Disconnect("Resetting...");
             _state.Reset(loggedReason);
         }

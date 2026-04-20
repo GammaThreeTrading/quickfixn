@@ -284,13 +284,23 @@ namespace QuickFix
                 HashSet<SessionID> disconnectedSessions = new HashSet<SessionID>(_disconnected);
                 foreach (SessionID sessionId in disconnectedSessions)
                 {
-                    Session? session = Session.LookupSession(sessionId);
-                    if (session is not null && session.IsEnabled)
+                    // Isolate per-session failures: one session throwing (e.g. a stale
+                    // disposed responder in Reset) must not abort the whole foreach and
+                    // leave every other disconnected session stuck for the current cycle.
+                    try
                     {
-                        if (session.IsNewSession)
-                            session.Reset("New session");
-                        if (session.IsSessionTime)
-                            DoConnect(session, _settings.Get(sessionId));
+                        Session? session = Session.LookupSession(sessionId);
+                        if (session is not null && session.IsEnabled)
+                        {
+                            if (session.IsNewSession)
+                                session.Reset("New session");
+                            if (session.IsSessionTime)
+                                DoConnect(session, _settings.Get(sessionId));
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        _nonSessionLog.OnEvent($"Connect failed for session {sessionId}: {e}");
                     }
                 }
             }
