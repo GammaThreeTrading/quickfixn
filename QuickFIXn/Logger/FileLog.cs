@@ -14,6 +14,10 @@ public class FileLog : ILog
 {
     private readonly object _sync = new();
 
+    // Rotate log files when they reach this size. Prior generation is kept as .old;
+    // total on-disk footprint per log is therefore bounded at ~2x this value.
+    private const long MaxLogFileBytes = 10 * 1024 * 1024;
+
     private System.IO.StreamWriter? _messageLog;
     private System.IO.StreamWriter? _eventLog;
 
@@ -88,6 +92,37 @@ public class FileLog : ILog
         };
     }
 
+    /// <summary>
+    /// If the given writer's underlying file has grown past MaxLogFileBytes, close it,
+    /// rotate the file to .old (overwriting any previous .old), and null out the writer
+    /// so the next Ensure*LogInit() call opens a fresh file. Must be called while
+    /// holding _sync.
+    /// </summary>
+    private static void RotateIfNeeded(ref System.IO.StreamWriter? writer, string fileName)
+    {
+        if (writer is null)
+            return;
+        if (writer.BaseStream.Length < MaxLogFileBytes)
+            return;
+
+        writer.Dispose();
+        writer = null;
+
+        string oldFileName = fileName + ".old";
+        try
+        {
+            if (System.IO.File.Exists(oldFileName))
+                System.IO.File.Delete(oldFileName);
+            System.IO.File.Move(fileName, oldFileName);
+        }
+        catch
+        {
+            // Rotation failed (file locked by AV, permission issue, etc.).
+            // Fall back to deleting the current file so we don't keep growing.
+            try { System.IO.File.Delete(fileName); } catch { /* last resort */ }
+        }
+    }
+
     #region Log Members
 
     public void Clear()
@@ -109,6 +144,7 @@ public class FileLog : ILog
         lock (_sync)
         {
             DisposedCheck();
+            RotateIfNeeded(ref _messageLog, _messageLogFileName);
             EnsureMessageLogInit();
             _messageLog.WriteLine(DateTimeConverter.ToFIX(DateTime.UtcNow, TimeStampPrecision.Millisecond) + " : " + msg);
         }
@@ -119,6 +155,7 @@ public class FileLog : ILog
         lock (_sync)
         {
             DisposedCheck();
+            RotateIfNeeded(ref _messageLog, _messageLogFileName);
             EnsureMessageLogInit();
             _messageLog.WriteLine(DateTimeConverter.ToFIX(DateTime.UtcNow, TimeStampPrecision.Millisecond) + " : " + msg);
         }
@@ -129,6 +166,7 @@ public class FileLog : ILog
         lock (_sync)
         {
             DisposedCheck();
+            RotateIfNeeded(ref _eventLog, _eventLogFileName);
             EnsureEventLogInit();
             _eventLog.WriteLine(DateTimeConverter.ToFIX(DateTime.UtcNow, TimeStampPrecision.Millisecond) + " : " + s);
         }
