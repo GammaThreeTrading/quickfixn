@@ -80,20 +80,48 @@ namespace QuickFix.Transport
                 t.Initiator.SetDisconnected(t.Session.SessionID);
                 t.Initiator.RemoveThread(t);
 
-                // Diagnostic: only log thread exits that happened while the session
-                // still thought it was logged on. Those are the events that create
-                // stale-responder state (Session.Disconnect() did NOT run), which the
-                // zombie-session fix now tolerates on the next Connect() cycle. Healthy
-                // exits (failed reconnects, clean shutdowns) are silent — NonSessionLog
-                // keeps its "only appears when something notable happened" signal.
+                // Propagate disconnect into Session state. If the reader thread exited
+                // due to peer death / socket close, nothing in the read path calls
+                // Session.Disconnect() — only SocketInitiatorThread.Disconnect(), which
+                // closes the stream but does not touch Session.IsLoggedOn. That leaves
+                // IsLoggedOn=true indefinitely, because subsequent reconnect attempts
+                // fail at SetupStream() before reaching SetResponder() / Session.Reset
+                // when the peer stays dead. External observers (portal status UI,
+                // liveness checks, monitoring) then see a stale "connected" state.
+                //
+                // Force the state transition here so the Session object reflects
+                // reality the moment the reader thread exits, without waiting for a
+                // successful reconnect that may never happen.
+                //
+                // Safety:
+                //  - Session.Disconnect() calls _responder.Disconnect() which is this
+                //    SocketInitiatorThread. Its Disconnect() is idempotent
+                //    (Interlocked.Exchange guard) — second call is a fast no-op.
+                //  - Session.Disconnect() wraps responder calls in try/catch, so a
+                //    throwing responder cannot prevent logon-flag cleanup.
+                //  - Gated on IsLoggedOn so it's a no-op for healthy exits
+                //    (out-of-session shutdown, clean logout already cleared state,
+                //    failed initial connect where logon never completed).
                 try
                 {
                     if (!t.Session.Disposed && t.Session.IsLoggedOn)
+                    {
                         t.NonSessionLog.OnEvent(
                             $"SocketInitiatorThread exited while IsLoggedOn=True [session={t.Session.SessionID}] " +
-                            "- stale responder state was created; next Connect() will clear it via Session.Reset.");
+                            "- forcing Session.Disconnect to clear stale IsLoggedOn state.");
+                        t.Session.Disconnect(
+                            "Reader thread exited; propagating disconnect to session state");
+                    }
                 }
-                catch { /* diagnostic only */ }
+                catch (Exception ex)
+                {
+                    try
+                    {
+                        t.NonSessionLog.OnEvent(
+                            $"Force-disconnect in finally failed [session={t.Session.SessionID}]: {ex}");
+                    }
+                    catch { /* diagnostic only */ }
+                }
             }
         }
 
