@@ -824,5 +824,158 @@ public class SessionTest
         SendNOSMessage();
         Assert.That(!SENT_RESEND_REQUEST());
     }
+
+    /// <summary>
+    /// Responder that throws from both Send() and Disconnect() — simulates a socket
+    /// whose underlying stream was already disposed by another thread. This reproduces
+    /// the stale-responder condition that caused the NH_DW_DEV logout storm.
+    /// </summary>
+    private sealed class ThrowingResponder : QuickFix.IResponder
+    {
+        public int SendCalls;
+        public int DisconnectCalls;
+        public bool ThrowOnSend = true;
+        public bool ThrowOnDisconnect = true;
+
+        public bool Send(string msgStr)
+        {
+            SendCalls++;
+            if (ThrowOnSend)
+                throw new System.IO.IOException("stream disposed");
+            return true;
+        }
+
+        public void Disconnect()
+        {
+            DisconnectCalls++;
+            if (ThrowOnDisconnect)
+                throw new System.IO.IOException("stream disposed");
+        }
+    }
+
+    /// <summary>
+    /// IApplication stub that doesn't throw from OnLogout — needed because the
+    /// shared MockApplication.OnLogout throws NotImplementedException, which blows
+    /// up the Disconnect path we're trying to exercise in these tests.
+    /// </summary>
+    private sealed class QuietApplication : QuickFix.IApplication
+    {
+        public void ToAdmin(QuickFix.Message m, QuickFix.SessionID s) { }
+        public void FromAdmin(QuickFix.Message m, QuickFix.SessionID s) { }
+        public void ToApp(QuickFix.Message m, QuickFix.SessionID s) { }
+        public void FromApp(QuickFix.Message m, QuickFix.SessionID s) { }
+        public void OnCreate(QuickFix.SessionID s) { }
+        public void OnLogout(QuickFix.SessionID s) { }
+        public void OnLogon(QuickFix.SessionID s) { }
+    }
+
+    private QuickFix.Session CreateQuietSession(out SessionTestSupport.MockResponder responder)
+    {
+        responder = new SessionTestSupport.MockResponder();
+        var sessionId = new QuickFix.SessionID("FIX.4.2", "QS", "QT");
+        var cfg = new QuickFix.SettingsDictionary();
+        cfg.SetBool(QuickFix.SessionSettings.PERSIST_MESSAGES, false);
+        cfg.SetString(QuickFix.SessionSettings.CONNECTION_TYPE, "acceptor");
+        cfg.SetString(QuickFix.SessionSettings.START_TIME, "00:00:00");
+        cfg.SetString(QuickFix.SessionSettings.END_TIME, "00:00:00");
+        var settings = new QuickFix.SessionSettings();
+        settings.Set(sessionId, cfg);
+        var session = new QuickFix.Session(
+            false, new QuietApplication(), new MemoryStoreFactory(), sessionId,
+            new QuickFix.DataDictionaryProvider(), new QuickFix.SessionSchedule(cfg),
+            0, new NullLogFactory(), new QuickFix.DefaultMessageFactory(), "blah");
+        session.SetResponder(responder);
+        session.CheckLatency = false;
+        return session;
+    }
+
+    private void LogonSession(QuickFix.Session session)
+    {
+        var msg = new QuickFix.FIX42.Logon();
+        msg.Header.SetField(new QuickFix.Fields.TargetCompID(session.SessionID.SenderCompID));
+        msg.Header.SetField(new QuickFix.Fields.SenderCompID(session.SessionID.TargetCompID));
+        msg.Header.SetField(new QuickFix.Fields.MsgSeqNum(1));
+        msg.Header.SetField(new QuickFix.Fields.SendingTime(DateTime.UtcNow));
+        msg.SetField(new QuickFix.Fields.HeartBtInt(1));
+        session.Next(msg.ConstructString());
+    }
+
+    [Test]
+    public void GenerateLogoutIsIdempotent()
+    {
+        // Two consecutive GenerateLogout() calls should produce exactly one logout
+        // on the wire and one seqnum increment, even on a healthy responder.
+        var session = CreateQuietSession(out var responder);
+        LogonSession(session);
+        responder.MsgLookup.Clear();
+        SeqNumType seqBefore = session.NextSenderMsgSeqNum;
+
+        session.GenerateLogout();
+        session.GenerateLogout();
+        session.GenerateLogout();
+
+        Assert.That(responder.GetCount(QuickFix.Fields.MsgType.LOGOUT), Is.EqualTo(1),
+            "Only one logout should be sent while SentLogout is latched true.");
+        Assert.That(session.NextSenderMsgSeqNum, Is.EqualTo(seqBefore + 1),
+            "Seqnum should advance exactly once; extra calls must not burn seqnums.");
+    }
+
+    [Test]
+    public void GenerateLogoutWithThrowingResponderLatchesSentLogout()
+    {
+        // If the first Send() throws (stale socket), SentLogout must still latch true
+        // so subsequent ticks don't re-enter and spam. This is the core fix for the
+        // 125,778-logout storm — without latching, every tick burns a seqnum to the store.
+        var session = CreateQuietSession(out _);
+        LogonSession(session);
+        SeqNumType seqBefore = session.NextSenderMsgSeqNum;
+        var throwing = new ThrowingResponder();
+        session.SetResponder(throwing);
+
+        Assert.DoesNotThrow(() => session.GenerateLogout(),
+            "First GenerateLogout must swallow send exception.");
+        Assert.DoesNotThrow(() => session.GenerateLogout(),
+            "Second GenerateLogout must short-circuit on latched SentLogout.");
+        Assert.DoesNotThrow(() => session.GenerateLogout());
+
+        Assert.That(throwing.SendCalls, Is.EqualTo(1),
+            "Responder.Send must only be called once; subsequent calls must short-circuit.");
+        // Persist ran before Send threw on the first call, so one seqnum is burned;
+        // subsequent calls must NOT burn any more.
+        Assert.That(session.NextSenderMsgSeqNum, Is.LessThanOrEqualTo(seqBefore + 1),
+            "After a throwing Send, further GenerateLogout calls must not advance seqnum.");
+    }
+
+    [Test]
+    public void DisconnectSurvivesThrowingResponder()
+    {
+        // Disconnect must null the responder and clear logon flags even if
+        // IResponder.Disconnect() throws — otherwise the session becomes a zombie
+        // that re-enters logout/reset paths every tick.
+        var session = CreateQuietSession(out _);
+        LogonSession(session);
+        Assert.That(session.IsLoggedOn, Is.True);
+        session.SetResponder(new ThrowingResponder());
+
+        Assert.DoesNotThrow(() => session.Disconnect("test"));
+
+        Assert.That(session.HasResponder, Is.False, "responder must be nulled despite throw");
+        Assert.That(session.IsLoggedOn, Is.False, "logon flags must clear despite throw");
+    }
+
+    [Test]
+    public void ResetSurvivesThrowingResponder()
+    {
+        // Reset() must fully clean state even if both GenerateLogout's Send and
+        // Disconnect throw — this closes the concrete loop that produced the logout storm.
+        var session = CreateQuietSession(out _);
+        LogonSession(session);
+        session.SetResponder(new ThrowingResponder());
+
+        Assert.DoesNotThrow(() => session.Reset("test"));
+
+        Assert.That(session.HasResponder, Is.False);
+        Assert.That(session.IsLoggedOn, Is.False);
+    }
 }
 

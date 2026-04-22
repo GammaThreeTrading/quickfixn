@@ -390,7 +390,13 @@ namespace QuickFix
                 if (_responder is not null)
                 {
                     Log.OnEvent($"Session {SessionID} disconnecting: {reason}");
-                    _responder.Disconnect();
+                    // IResponder.Disconnect() may throw if the underlying socket/stream was
+                    // already disposed by another thread. Swallow it — we MUST null the
+                    // responder and clear logon flags below, otherwise Session.Next() keeps
+                    // seeing HasResponder=true and IsLoggedOn=true and re-enters the
+                    // logout/disconnect path every tick.
+                    try { _responder.Disconnect(); }
+                    catch (Exception e) { Log.OnEvent($"Responder.Disconnect threw (ignored): {e.Message}"); }
                     _responder = null;
                 }
                 else
@@ -1002,7 +1008,12 @@ namespace QuickFix
                 try { GenerateLogout(logoutMessage); }
                 catch (Exception e) { Log.OnEvent($"Reset: logout send failed (ignored): {e.Message}"); }
             }
-            Disconnect("Resetting...");
+            // Disconnect can also throw on a stale responder (IResponder.Disconnect() on
+            // an already-disposed socket). If that escapes, _state.Reset() below never runs,
+            // leaving SentLogon/ReceivedLogon stuck true — which causes every subsequent
+            // Next() tick to re-enter Reset and GenerateLogout, producing a logout storm.
+            try { Disconnect("Resetting..."); }
+            catch (Exception e) { Log.OnEvent($"Reset: disconnect failed (ignored): {e.Message}"); }
             _state.Reset(loggedReason);
         }
 
@@ -1271,9 +1282,20 @@ namespace QuickFix
         /// </summary>
         /// <param name="other">used to fill MsgSeqNum field, if configuration requires it; ignored if null</param>
         /// <param name="text">written into the Text field; ignored if empty/null</param>
-        /// <returns></returns>
-        private void ImplGenerateLogout(Message? other = null, string? text = null)
+        /// <returns>true if a logout was generated; false if one was already in flight</returns>
+        private bool ImplGenerateLogout(Message? other = null, string? text = null)
         {
+            // Idempotent: if a logout is already in flight, don't spam another.
+            // Disconnect() clears SentLogout, so the next reconnect can logout again.
+            // Without this guard, a stale responder whose Send() throws can cause every tick
+            // to re-enter GenerateLogout -> Persist (seqnum++) -> Send (throw) indefinitely.
+            if (_state.SentLogout)
+                return false;
+
+            // Mark intent before SendRaw so that if SendRaw throws (stale socket, etc.)
+            // subsequent ticks still see SentLogout=true and short-circuit.
+            _state.SentLogout = true;
+
             Message logout = _msgFactory.Create(SessionID.BeginString, Fields.MsgType.LOGOUT);
             InitializeHeader(logout);
             if (!string.IsNullOrEmpty(text))
@@ -1289,7 +1311,17 @@ namespace QuickFix
                     Log.OnEvent("Error: No message sequence number: " + other);
                 }
             }
-            _state.SentLogout = SendRaw(logout, 0);
+
+            try
+            {
+                SendRaw(logout, 0);
+            }
+            catch (Exception e)
+            {
+                Log.OnEvent($"GenerateLogout: send failed (SentLogout latched true to prevent spam): {e.Message}");
+            }
+
+            return true;
         }
 
         public void GenerateHeartbeat()
