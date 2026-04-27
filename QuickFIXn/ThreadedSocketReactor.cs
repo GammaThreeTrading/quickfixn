@@ -123,6 +123,14 @@ namespace QuickFix
                     if (State.RUNNING == ReactorState)
                     {
                         ApplySocketOptions(client, _socketSettings);
+                        // The ClientHandlerThread ctor is I/O-free and returns
+                        // instantly. The TLS handshake (and any other blocking
+                        // setup) happens inside ClientHandlerThread.Run() on the
+                        // worker thread, NOT on this accept thread. This matters:
+                        // running the handshake here would let a single stalled
+                        // peer freeze the entire accept loop, leaving the listener
+                        // port unreachable from outside even though the process is
+                        // still alive.
                         ClientHandlerThread t = new ClientHandlerThread(
                             client, _nextClientId++, _socketSettings, _acceptorSocketDescriptor, _nonSessionLog);
                         t.Exited += OnClientHandlerThreadExited;

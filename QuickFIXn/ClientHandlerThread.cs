@@ -29,7 +29,26 @@ namespace QuickFix
 
         private Thread? _thread = null;
         private volatile bool _isShutdownRequested = false;
-        private readonly SocketReader _socketReader;
+
+        // SocketReader is created in Run() AFTER the TLS handshake completes
+        // on the worker thread. Constructing it in the ctor would run the
+        // handshake on the reactor's accept thread, which is shared by every
+        // session on this listener. A stalled handshake there freezes the
+        // entire accept loop — port goes unreachable, only restart fixes it.
+        private SocketReader? _socketReader = null;
+
+        private readonly TcpClient _tcpClient;
+        private readonly SocketSettings _socketSettings;
+        private readonly AcceptorSocketDescriptor? _acceptorDescriptor;
+        private readonly NonSessionLog _nonSessionLog;
+
+        // Backstop against stalled TLS handshakes. Without this, a misbehaving
+        // peer (or one whose TCP path got into a half-dead state) can leave
+        // the worker blocked in AuthenticateAsServer indefinitely, leaking
+        // worker threads. Applied as Socket.ReceiveTimeout for the duration
+        // of the handshake only; the configured per-session timeout (or none)
+        // is restored before normal session reads begin.
+        private const int HandshakeReceiveTimeoutMs = 10000;
 
         internal ClientHandlerThread(
             TcpClient tcpClient,
@@ -39,7 +58,13 @@ namespace QuickFix
             NonSessionLog nonSessionLog
         ) {
             Id = clientId;
-            _socketReader = new SocketReader(tcpClient, socketSettings, this, acceptorDescriptor, nonSessionLog);
+            _tcpClient = tcpClient;
+            _socketSettings = socketSettings;
+            _acceptorDescriptor = acceptorDescriptor;
+            _nonSessionLog = nonSessionLog;
+            // No I/O here. SocketReader (and the TLS handshake it triggers)
+            // is constructed in Run() so the handshake runs on this worker
+            // thread, not on the reactor's accept thread.
         }
 
         public void Start()
@@ -65,19 +90,57 @@ namespace QuickFix
 
         private void Run()
         {
-            while (!_isShutdownRequested)
+            try
             {
+                // TLS handshake happens here, on the worker thread, with a
+                // receive timeout in place. If a peer connects but never
+                // sends a valid ClientHello (or stalls mid-handshake), the
+                // handshake fails after HandshakeReceiveTimeoutMs and only
+                // this worker is affected — the reactor keeps accepting.
+                int originalReceiveTimeout = _tcpClient.ReceiveTimeout;
+                _tcpClient.ReceiveTimeout = HandshakeReceiveTimeoutMs;
+
                 try
                 {
-                    _socketReader.Read();
+                    _socketReader = new SocketReader(
+                        _tcpClient, _socketSettings, this, _acceptorDescriptor, _nonSessionLog);
                 }
                 catch (Exception e)
                 {
-                    Shutdown(e.Message);
+                    // Preserve the legacy log message format ("Error accepting
+                    // connection: ...") so existing log analysis still works.
+                    // Previously this was logged from ThreadedSocketReactor.Run()
+                    // because the handshake ran on the accept thread; now it's
+                    // logged from here, on the worker thread.
+                    _nonSessionLog.OnEvent($"Error accepting connection: {e}");
+                    try { _tcpClient.Close(); } catch { }
+                    return;
+                }
+
+                // Restore the configured timeout (or 0 = no timeout) for
+                // normal session reads, which need to block indefinitely
+                // waiting for FIX messages.
+                try { _tcpClient.ReceiveTimeout = originalReceiveTimeout; } catch { }
+
+                while (!_isShutdownRequested)
+                {
+                    try
+                    {
+                        _socketReader.Read();
+                    }
+                    catch (Exception e)
+                    {
+                        Shutdown(e.Message);
+                    }
                 }
             }
-
-            OnExited();
+            finally
+            {
+                // Always fire Exited, even on handshake failure, so the
+                // reactor removes us from _clientThreads and we don't leak
+                // entries.
+                OnExited();
+            }
         }
 
         private void OnExited() {
@@ -88,7 +151,11 @@ namespace QuickFix
 
         public bool Send(string data)
         {
-            return _socketReader.Send(data) > 0;
+            // _socketReader is null only during the brief window before the
+            // TLS handshake completes. Send() should not be called in that
+            // window (no Session is associated with this thread until after
+            // a Logon has been read), but guard defensively.
+            return _socketReader is not null && _socketReader.Send(data) > 0;
         }
 
         public void Disconnect()
@@ -111,7 +178,22 @@ namespace QuickFix
             if (_disposed) return;
             if (disposing)
             {
-                _socketReader.Dispose();
+                if (_socketReader is not null)
+                {
+                    // Normal path: SocketReader owns the stream chain and
+                    // closes the TcpClient when disposed.
+                    _socketReader.Dispose();
+                }
+                else
+                {
+                    // Worker never created the SocketReader — either Start()
+                    // was never called, or the handshake failed and Run()
+                    // returned before SocketReader was constructed. Either
+                    // way, the TcpClient is still our responsibility. Close
+                    // it directly so the underlying socket doesn't leak
+                    // until GC finalization.
+                    try { _tcpClient.Close(); } catch { }
+                }
             }
             _disposed = true;
         }
