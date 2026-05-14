@@ -245,7 +245,13 @@ namespace QuickFix
 
             ILog log = logFactory.Create(sessId);
 
-            _state = new SessionState(isInitiator, log, heartBtInt, storeFactory.Create(sessId));
+            var store = storeFactory.Create(sessId);
+            _state = new SessionState(isInitiator, log, heartBtInt, store);
+
+            // Let SQLStore surface its background-writer diagnostics (e.g. Reset
+            // timings) through the session's configured log, whatever it is.
+            if (store is QuickFix.SQLStore sqlStore)
+                sqlStore.Log = log;
 
             // Configuration defaults.
             // Will be overridden by the SessionFactory with values in the user's configuration.

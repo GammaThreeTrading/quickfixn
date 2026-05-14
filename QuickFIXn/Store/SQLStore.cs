@@ -1,8 +1,10 @@
 using Microsoft.Data.SqlClient;
+using QuickFix.Logger;
 using QuickFix.Store;
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Diagnostics;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -11,8 +13,58 @@ using System.Threading.Tasks;
 
 namespace QuickFix
 {
+    /// <summary>
+    /// SQLStore with full write-behind for the session hot path.
+    ///
+    /// All SQL writes (message persist, seqnum updates, Reset) are enqueued to a
+    /// single background writer via an ordered channel. The session thread only
+    /// touches the in-memory cache, so no logon, send, or receive ever blocks on
+    /// SqlConnection.Open() or DELETE/UPDATE latency.
+    ///
+    /// Correctness: cache_ is authoritative for the session thread. SQL eventually
+    /// catches up in enqueue order. On hard crash mid-flush the sessions table can
+    /// be behind the cache; on restart, PopulateCache reads the stale state and
+    /// the IsNewSession path repairs it for new-day startups. For mid-day crashes
+    /// the same seqnum-mismatch exposure applies as in QuickFIX/J's async stores.
+    /// </summary>
     public class SQLStore : IMessageStore, IDisposable
     {
+        // -----------------------------------------------------------------------
+        // Channel op types
+        // -----------------------------------------------------------------------
+        private abstract record QueueOp;
+        private sealed record WriteMsgOp(ulong SeqNum, string Message) : QueueOp;
+        private sealed record ResetOp(DateTime CreationTime, ulong NextTargetSeq, ulong NextSenderSeq, DateTime EnqueuedAt) : QueueOp;
+        private sealed record SetSeqOp(bool IsSender, ulong Value) : QueueOp;
+        // FlushBarrierOp lets Get() wait until all prior ops have been applied
+        // to SQL before reading. Without it there's a small window where Reset()
+        // has updated the cache and enqueued the DELETE but not yet executed it,
+        // and a concurrent Get() would read stale rows.
+        private sealed record FlushBarrierOp(TaskCompletionSource<bool> Tcs) : QueueOp;
+
+        private const int BatchSize = 50;
+        private const int FlushIntervalMs = 100;
+        // After an unexpected writer crash, back off briefly before restarting so
+        // we don't busy-loop if the crash is deterministic.
+        private const int WriterRestartDelayMs = 2000;
+        // Upper bound on how long Get() will wait for in-flight ops to drain
+        // before reading SQL. A healthy flush completes well under 1s even with
+        // a Reset in the queue, so 5s gives ~10× headroom for transient slowness
+        // while still failing fast enough that the SocketReader thread doesn't
+        // miss heartbeats during a SQL storm. On timeout we proceed with the
+        // SELECT; the FIX protocol's GapFill recovery handles any stale-read
+        // edge case downstream.
+        private const int GetFlushTimeoutMs = 5_000;
+
+        private readonly Channel<QueueOp> _channel = Channel.CreateUnbounded<QueueOp>(
+            new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
+
+        private readonly Task _writerTask;
+        private readonly CancellationTokenSource _cts = new();
+
+        // -----------------------------------------------------------------------
+        // Session state / cache
+        // -----------------------------------------------------------------------
         private readonly MemoryStore cache_ = new MemoryStore();
 
         private readonly SessionID _sessionID;
@@ -37,46 +89,17 @@ namespace QuickFix
         private readonly string _target;
         private readonly string _qual;
 
+        // _storeLock serializes cache mutation + channel writes from the session
+        // thread. The background writer never takes it.
         private readonly object _storeLock = new();
-
-        // -----------------------------------------------------------------------
-        // _dbWriteLock: serializes FlushBatchAsync vs Reset() at the .NET level,
-        // preventing concurrent INSERT/DELETE on the messages table (SQL deadlocks).
-        // Per-instance; no cross-session effects.
-        // -----------------------------------------------------------------------
-        private readonly SemaphoreSlim _dbWriteLock = new SemaphoreSlim(1, 1);
-
-        // -----------------------------------------------------------------------
-        // _flushCts: allows Reset() to cancel an in-progress FlushBatchAsync so
-        // _dbWriteLock.Wait() in Reset() returns quickly (not blocking session locks).
-        // Replaced under _flushCtsLock after each Reset().
-        // -----------------------------------------------------------------------
-        private CancellationTokenSource _flushCts = new CancellationTokenSource();
-        private readonly object _flushCtsLock = new();
 
         private static readonly Regex SafeIdentifier = new(@"^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.Compiled);
 
-        // -----------------------------------------------------------------------
-        // Async write-behind: ONLY for Set().
-        // Everything else (Reset, PopulateCache, etc.) is original and untouched.
-        // -----------------------------------------------------------------------
-
-        private record WriteItem(ulong SeqNum, string Message);
-
-        private const int BatchSize = 50;
-        private const int FlushIntervalMs = 100;
-
-        private readonly Channel<WriteItem> _channel =
-            Channel.CreateUnbounded<WriteItem>(new UnboundedChannelOptions
-            {
-                SingleReader = true,
-                SingleWriter = false
-            });
-
-        private Task? _writerTask;
-        private readonly CancellationTokenSource _cts = new();
-        private int _writerStarted = 0; // Interlocked: 0=not started, 1=started
-
+        // The session's ILog. Wired by Session after construction so the store can
+        // surface diagnostic events (e.g., Reset timings) through whatever log the
+        // session is configured with — ScreenLog, FileLog, SQLLog, or Composite.
+        // Null until Session wires it; in that case diagnostics fall back to Console.
+        public ILog? Log { get; set; }
 
         public SQLStore(SessionID sessionId, string user, string password, string connectionString, SessionSettings settings)
         {
@@ -90,16 +113,12 @@ namespace QuickFix
 
             if (_sessionSettings.Get(_sessionID).Has(SessionSettings.SQL_STORE_SESSION_TABLE))
                 sessions_table = _sessionSettings.Get(_sessionID).GetString(SessionSettings.SQL_STORE_SESSION_TABLE);
-
             if (_sessionSettings.Get(_sessionID).Has(SessionSettings.SQL_STORE_MESSAGES_TABLE))
                 messages_table = _sessionSettings.Get(_sessionID).GetString(SessionSettings.SQL_STORE_MESSAGES_TABLE);
-
             if (_sessionSettings.Get(_sessionID).Has(SessionSettings.SQL_STORE_DATASOURCE))
                 _datasource = _sessionSettings.Get(_sessionID).GetString(SessionSettings.SQL_STORE_DATASOURCE);
-
             if (_sessionSettings.Get(_sessionID).Has(SessionSettings.SQL_STORE_INITIAL_CATALOG))
                 _initialcatalog = _sessionSettings.Get(_sessionID).GetString(SessionSettings.SQL_STORE_INITIAL_CATALOG);
-
             if (_sessionSettings.Get(_sessionID).Has(SessionSettings.SQL_STORE_IGNORE_ADMIN_MESSAGES))
                 _ignoreAdminMessages = _sessionSettings.Get(_sessionID).GetBool(SessionSettings.SQL_STORE_IGNORE_ADMIN_MESSAGES);
 
@@ -110,23 +129,25 @@ namespace QuickFix
             _sessionsTableQ = QuoteName(sessions_table);
             _messagesTableQ = QuoteName(messages_table);
 
-            // Writer starts lazily on first real message (see Set()).
-            // This guarantees it is NOT running during the very first startup Reset().
+            // PopulateCache is sync. It only SELECTs (and at most INSERTs once) on the
+            // sessions table — no DELETEs, no contention. Fast even on cold pool.
             PopulateCache();
+
+            // Eager writer start. Reset() and the SetNext* paths enqueue ops, so the
+            // writer must be running from the start (no more lazy-on-first-Set).
+            _writerTask = Task.Run(() => BackgroundWriterAsync(_cts.Token));
         }
 
         public void Dispose()
         {
             _channel.Writer.Complete();
-            _writerTask?.Wait(TimeSpan.FromSeconds(5));
-            _flushCts.Dispose();
+            try { _writerTask?.Wait(TimeSpan.FromSeconds(5)); } catch { }
             _cts.Dispose();
         }
 
         // -----------------------------------------------------------------------
-        // Connection string (original — unchanged)
+        // Connection string
         // -----------------------------------------------------------------------
-
         private string GetSqlConnectionString()
         {
             var sb = new SqlConnectionStringBuilder();
@@ -163,9 +184,9 @@ namespace QuickFix
         }
 
         // -----------------------------------------------------------------------
-        // Cache/session bootstrap (original — unchanged)
+        // PopulateCache / Refresh — sync, called only at startup or explicit
+        // Session.Refresh().
         // -----------------------------------------------------------------------
-
         public void PopulateCache()
         {
             lock (_storeLock)
@@ -204,7 +225,7 @@ WHERE beginstring = @begin
                     }
                 }
 
-                var createTime = cache_.CreationTime.HasValue ? cache_.CreationTime.Value : DateTime.UtcNow;
+                var createTime = cache_.CreationTime ?? DateTime.UtcNow;
 
                 using (var cmdInsert = conn.CreateCommand())
                 {
@@ -228,6 +249,11 @@ VALUES
 
         public void Refresh()
         {
+            // NOTE: With write-behind, in-flight ops in the channel haven't reached SQL
+            // yet. Refresh re-reads SQL and can therefore roll back in-memory state to
+            // a slightly-stale snapshot. In practice Refresh is invoked at logon time
+            // (RefreshOnLogon) when traffic is quiet, so the race window is small —
+            // but be aware.
             lock (_storeLock)
             {
                 cache_.Reset();
@@ -236,9 +262,8 @@ VALUES
         }
 
         // -----------------------------------------------------------------------
-        // IMessageStore: seqnums (original — unchanged)
+        // Seqnums — cache updates synchronously, SQL persistence enqueued.
         // -----------------------------------------------------------------------
-
         public ulong GetNextSenderMsgSeqNum() => cache_.NextSenderMsgSeqNum;
         public ulong GetNextTargetMsgSeqNum() => cache_.NextTargetMsgSeqNum;
 
@@ -246,31 +271,8 @@ VALUES
         {
             lock (_storeLock)
             {
-                try
-                {
-                    using var conn = new SqlConnection(GetSqlConnectionString());
-                    conn.Open();
-
-                    using var cmd = conn.CreateCommand();
-                    cmd.CommandText = $@"
-UPDATE {_sessionsTableQ} WITH (ROWLOCK)
-SET outgoing_seqnum = @value
-WHERE beginstring = @begin
-  AND sendercompid = @sender
-  AND targetcompid = @target
-  AND session_qualifier = @qual;";
-
-                    cmd.Parameters.Add("@value", SqlDbType.BigInt).Value = (long)value;
-                    AddSessionKeyParams(cmd);
-
-                    cmd.ExecuteNonQuery();
-                    cache_.NextSenderMsgSeqNum = value;
-                }
-                catch (Exception ex)
-                {
-                    Console.Write("SetNextSenderMsgSeqNum: ");
-                    Console.WriteLine(ex);
-                }
+                cache_.NextSenderMsgSeqNum = value;
+                _channel.Writer.TryWrite(new SetSeqOp(IsSender: true, value));
             }
         }
 
@@ -278,31 +280,8 @@ WHERE beginstring = @begin
         {
             lock (_storeLock)
             {
-                try
-                {
-                    using var conn = new SqlConnection(GetSqlConnectionString());
-                    conn.Open();
-
-                    using var cmd = conn.CreateCommand();
-                    cmd.CommandText = $@"
-UPDATE {_sessionsTableQ} WITH (ROWLOCK)
-SET incoming_seqnum = @value
-WHERE beginstring = @begin
-  AND sendercompid = @sender
-  AND targetcompid = @target
-  AND session_qualifier = @qual;";
-
-                    cmd.Parameters.Add("@value", SqlDbType.BigInt).Value = (long)value;
-                    AddSessionKeyParams(cmd);
-
-                    cmd.ExecuteNonQuery();
-                    cache_.NextTargetMsgSeqNum = value;
-                }
-                catch (Exception ex)
-                {
-                    Console.Write("SetNextTargetMsgSeqNum: ");
-                    Console.WriteLine(ex);
-                }
+                cache_.NextTargetMsgSeqNum = value;
+                _channel.Writer.TryWrite(new SetSeqOp(IsSender: false, value));
             }
         }
 
@@ -311,7 +290,7 @@ WHERE beginstring = @begin
             lock (_storeLock)
             {
                 cache_.IncrNextSenderMsgSeqNum();
-                SetNextSenderMsgSeqNum(cache_.NextSenderMsgSeqNum);
+                _channel.Writer.TryWrite(new SetSeqOp(IsSender: true, cache_.NextSenderMsgSeqNum));
             }
         }
 
@@ -320,7 +299,7 @@ WHERE beginstring = @begin
             lock (_storeLock)
             {
                 cache_.IncrNextTargetMsgSeqNum();
-                SetNextTargetMsgSeqNum(cache_.NextTargetMsgSeqNum);
+                _channel.Writer.TryWrite(new SetSeqOp(IsSender: false, cache_.NextTargetMsgSeqNum));
             }
         }
 
@@ -329,38 +308,32 @@ WHERE beginstring = @begin
         public ulong NextSenderMsgSeqNum
         {
             get => cache_.NextSenderMsgSeqNum;
-            set
-            {
-                lock (_storeLock)
-                {
-                    cache_.NextSenderMsgSeqNum = value;
-                    SetNextSenderMsgSeqNum(value);
-                }
-            }
+            set => SetNextSenderMsgSeqNum(value);
         }
 
         public ulong NextTargetMsgSeqNum
         {
             get => cache_.NextTargetMsgSeqNum;
-            set
-            {
-                lock (_storeLock)
-                {
-                    cache_.NextTargetMsgSeqNum = value;
-                    SetNextTargetMsgSeqNum(value);
-                }
-            }
+            set => SetNextTargetMsgSeqNum(value);
         }
 
         public DateTime GetCreationTime() => cache_.CreationTime!.Value;
 
         // -----------------------------------------------------------------------
-        // IMessageStore: messages
+        // Get — sync. Used by resend handling, not on the logon hot path.
+        //
+        // To avoid reading SQL state that is older than what the cache says
+        // (e.g., Reset has run on the cache but the DELETE hasn't flushed yet),
+        // we enqueue a FlushBarrierOp and wait for the writer to reach it. The
+        // wait is bounded by GetFlushTimeoutMs; on timeout we proceed with the
+        // read rather than block the session, accepting the small risk of stale
+        // data — which the FIX gap-fill protocol can recover from anyway.
         // -----------------------------------------------------------------------
-
         public void Get(ulong startSeqNum, ulong endSeqNum, List<string> messages)
         {
             if (messages == null) throw new ArgumentNullException(nameof(messages));
+
+            WaitForFlush(GetFlushTimeoutMs);
 
             lock (_storeLock)
             {
@@ -389,7 +362,24 @@ ORDER BY msgseqnum;";
             }
         }
 
-        // CHANGED: was synchronous DB call. Now enqueues to background writer.
+        // -----------------------------------------------------------------------
+        // Insert a barrier into the channel and wait for the writer to reach it.
+        // Used by Get() so reads observe all prior writes/resets/seqnum updates.
+        // Bounded wait — never blocks indefinitely even if the writer is wedged.
+        // -----------------------------------------------------------------------
+        private void WaitForFlush(int timeoutMs)
+        {
+            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!_channel.Writer.TryWrite(new FlushBarrierOp(tcs)))
+            {
+                // Channel is closed (shutting down). Best we can do is proceed.
+                return;
+            }
+
+            try { tcs.Task.Wait(timeoutMs); }
+            catch { /* tolerate cancellation/aggregation exceptions; the read can proceed either way */ }
+        }
+
         public bool Set(ulong msgSeqNum, string msg)
         {
             if (_ignoreAdminMessages)
@@ -402,111 +392,212 @@ ORDER BY msgseqnum;";
                 catch { }
             }
 
-            // Start writer on first real message.
-            // By the time the first app message arrives, logon and Reset() are done.
-            if (Interlocked.CompareExchange(ref _writerStarted, 1, 0) == 0)
-                _writerTask = Task.Run(() => BackgroundWriterAsync(_cts.Token));
-
-            _channel.Writer.TryWrite(new WriteItem(msgSeqNum, msg));
+            _channel.Writer.TryWrite(new WriteMsgOp(msgSeqNum, msg));
             return true;
         }
 
         // -----------------------------------------------------------------------
-        // Retry helper — SQL Server error 1205 is a deadlock victim; retrying
-        // after a brief random jitter resolves it in almost all cases.
-        // Only used for Reset() which runs on the session thread under locks.
+        // Reset — synchronous on the cache, asynchronous on SQL.
+        //
+        // The session thread (which called us via _state.Reset) gets correct
+        // cache state immediately, so the very next GenerateLogon sees seqnum 1.
+        // The actual DELETE messages + UPDATE sessions happens later on the
+        // background writer, where 12-second stalls are harmless.
+        //
+        // Channel ordering preserves correctness: pending pre-reset writes are
+        // dropped here (they'd be DELETEd anyway), and post-reset writes are
+        // enqueued AFTER the ResetOp, so they reach SQL after the DELETE+UPDATE.
         // -----------------------------------------------------------------------
-
-        private static void ExecuteWithDeadlockRetry(Action action, int maxRetries = 3)
+        public void Reset()
         {
-            for (int attempt = 0; ; attempt++)
+            lock (_storeLock)
+            {
+                // Drop pending pre-reset writes. They are about to be DELETEd
+                // anyway, and dropping them avoids briefly INSERTing rows the
+                // upcoming DELETE would erase a moment later.
+                while (_channel.Reader.TryRead(out _)) { }
+
+                cache_.Reset();
+                var creationTime = cache_.CreationTime ?? DateTime.UtcNow;
+                var nextTarget = cache_.NextTargetMsgSeqNum;
+                var nextSender = cache_.NextSenderMsgSeqNum;
+
+                _channel.Writer.TryWrite(new ResetOp(creationTime, nextTarget, nextSender, DateTime.UtcNow));
+            }
+        }
+
+        // -----------------------------------------------------------------------
+        // Background writer
+        //
+        // Single-reader. Processes the channel in order. Consecutive WriteMsgOps
+        // are batched into one MERGE; ResetOp, SetSeqOp, and FlushBarrierOp act
+        // as barriers that flush any pending writes first, then run their own SQL
+        // (or, for FlushBarrierOp, just signal completion).
+        //
+        // Self-healing: the outer while restarts the inner processing loop after
+        // a brief delay if an unexpected exception escapes the per-op try/catch.
+        // Without this, a bug here would silently kill the writer task, the
+        // channel would fill unboundedly, and the session would have no clue.
+        // -----------------------------------------------------------------------
+        private async Task BackgroundWriterAsync(CancellationToken ct)
+        {
+            var writeBatch = new List<WriteMsgOp>(BatchSize);
+
+            while (!ct.IsCancellationRequested)
             {
                 try
                 {
-                    action();
+                    while (await _channel.Reader.WaitToReadAsync(ct).ConfigureAwait(false))
+                    {
+                        // Brief delay so message bursts coalesce into a single MERGE.
+                        try { await Task.Delay(FlushIntervalMs, ct).ConfigureAwait(false); }
+                        catch (OperationCanceledException) { break; }
+
+                        while (_channel.Reader.TryRead(out var op))
+                            await DispatchOpAsync(op, writeBatch).ConfigureAwait(false);
+
+                        if (writeBatch.Count > 0)
+                        {
+                            await FlushWritesAsync(writeBatch).ConfigureAwait(false);
+                            writeBatch.Clear();
+                        }
+                    }
+
+                    // Channel completed (Dispose called) — drain whatever's left and exit cleanly.
+                    while (_channel.Reader.TryRead(out var op))
+                        await DispatchOpAsync(op, writeBatch).ConfigureAwait(false);
+                    if (writeBatch.Count > 0)
+                        await FlushWritesAsync(writeBatch).ConfigureAwait(false);
                     return;
                 }
-                catch (SqlException ex) when (ex.Number == 1205 && attempt < maxRetries)
+                catch (OperationCanceledException)
                 {
-                    // 1205 = deadlock victim — back off and retry
-                    int delayMs = 20 * (1 << attempt) + Random.Shared.Next(10); // 20, 40, 80ms + jitter
-                    Thread.Sleep(delayMs);
+                    return; // shutting down
+                }
+                catch (Exception ex)
+                {
+                    // Unknown crash. Per-op handlers should have caught SQL errors;
+                    // anything reaching here is unexpected (NRE, OOM, etc.). Don't
+                    // trust writeBatch state.
+                    LogWriterError(
+                        $"BackgroundWriter crashed, restarting in {WriterRestartDelayMs}ms: " +
+                        $"[{ex.GetType().Name}] {ex.Message}");
+                    writeBatch.Clear();
+
+                    try { await Task.Delay(WriterRestartDelayMs, ct).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { return; }
                 }
             }
         }
 
         // -----------------------------------------------------------------------
-        // Reset
-        //
-        // KEY CHANGE: Cancel any in-progress FlushBatchAsync before waiting for
-        // _dbWriteLock. This prevents Reset() from blocking under Session._sync
-        // while the background writer works through a 50-item batch.
-        //
-        // The cancellation is safe: Reset() drains the channel first, so any
-        // rows mid-flush are rows we're about to DELETE. Cancelling the INSERT
-        // and then DELETEing the table is a no-op at worst.
-        //
-        // After Reset(), a fresh CancellationTokenSource is installed so the
-        // background writer can resume flushing normally on the next logon.
+        // Dispatch one op. Non-write ops act as flush barriers: pending writes
+        // are flushed before the op runs so SQL state is consistent at the moment
+        // the op (or its FlushBarrier signal) takes effect.
         // -----------------------------------------------------------------------
-
-        public void Reset()
+        private async Task DispatchOpAsync(QueueOp op, List<WriteMsgOp> writeBatch)
         {
-            // 1. Drain queued writes — Reset() is about to delete them anyway.
-            while (_channel.Reader.TryRead(out _)) { }
-
-            // 2. Cancel any in-progress flush AND install a pre-cancelled token so that
-            //    any background writer thread that already drained the channel into its
-            //    local batch variable cannot re-insert those rows after the DELETE below.
-            //
-            //    Race prevented:
-            //      - Writer drains channel into local batch BEFORE Reset() drains it
-            //      - Reset() drains channel (nothing left), cancels oldCts
-            //      - Writer picks up _flushCts — must see a cancelled token, not a fresh one
-            //      - Fresh token installed only AFTER _dbWriteLock is released, so writer
-            //        cannot flush stale pre-Reset() rows into a post-Reset() clean table.
-            CancellationTokenSource oldCts;
-            lock (_flushCtsLock)
+            switch (op)
             {
-                oldCts = _flushCts;
-                var preCancel = new CancellationTokenSource();
-                preCancel.Cancel(); // pre-cancelled: blocks any flush attempt during Reset()
-                _flushCts = preCancel;
-            }
-            oldCts.Cancel();
-            oldCts.Dispose();
+                case WriteMsgOp w:
+                    writeBatch.Add(w);
+                    if (writeBatch.Count >= BatchSize)
+                    {
+                        await FlushWritesAsync(writeBatch).ConfigureAwait(false);
+                        writeBatch.Clear();
+                    }
+                    break;
 
-            // 3. Wait for the (now-cancelled) flush to release the lock.
-            //    This should return in microseconds.
-            _dbWriteLock.Wait();
+                case ResetOp r:
+                    if (writeBatch.Count > 0)
+                    {
+                        await FlushWritesAsync(writeBatch).ConfigureAwait(false);
+                        writeBatch.Clear();
+                    }
+                    await ApplyResetAsync(r).ConfigureAwait(false);
+                    break;
+
+                case SetSeqOp s:
+                    if (writeBatch.Count > 0)
+                    {
+                        await FlushWritesAsync(writeBatch).ConfigureAwait(false);
+                        writeBatch.Clear();
+                    }
+                    await ApplySetSeqAsync(s).ConfigureAwait(false);
+                    break;
+
+                case FlushBarrierOp b:
+                    if (writeBatch.Count > 0)
+                    {
+                        await FlushWritesAsync(writeBatch).ConfigureAwait(false);
+                        writeBatch.Clear();
+                    }
+                    b.Tcs.TrySetResult(true);
+                    break;
+            }
+        }
+
+        // -----------------------------------------------------------------------
+        // Writer-level error logging. Goes to Console + ILog (when wired). Used
+        // for restart notifications — these are rare and important enough that
+        // we want them surfaced loudly.
+        // -----------------------------------------------------------------------
+        private void LogWriterError(string message)
+        {
+            var line = $"{DateTime.UtcNow:O} SQLStore [{_sender}->{_target}]: {message}";
+            Console.WriteLine(line);
+            try { Log?.OnEvent($"SQLStore writer: {message}"); }
+            catch { /* don't let logging take down the writer we just restarted */ }
+        }
+
+        // -----------------------------------------------------------------------
+        // ApplyResetAsync — timed so we can root-cause the morning stall
+        // without instrumenting the session thread.
+        //
+        // Captures: queue latency (enqueue→start), open ms, delete ms, update ms,
+        // rows deleted, and final status. Surfaced via the session's ILog so the
+        // line lands wherever the session normally logs (event_log for SQLLog,
+        // file for FileLog, screen for ScreenLog, etc.).
+        // -----------------------------------------------------------------------
+        private async Task ApplyResetAsync(ResetOp op)
+        {
+            var queueLatencyMs = (long)(DateTime.UtcNow - op.EnqueuedAt).TotalMilliseconds;
+            var step = new Stopwatch();
+            long openMs = -1, deleteMs = -1, updateMs = -1;
+            int deletedRows = -1;
+            Exception? failure = null;
+
             try
             {
-                lock (_storeLock)
+                await ExecuteWithDeadlockRetryAsync(async () =>
                 {
-                    ExecuteWithDeadlockRetry(() =>
-                    {
-                        using var conn = new SqlConnection(GetSqlConnectionString());
-                        conn.Open();
+                    // Reset counters for each retry attempt so the log reflects the
+                    // attempt that actually succeeded (or last failed).
+                    openMs = -1; deleteMs = -1; updateMs = -1; deletedRows = -1;
 
-                        using (var cmdDel = conn.CreateCommand())
-                        {
-                            cmdDel.CommandText = $@"
+                    step.Restart();
+                    using var conn = new SqlConnection(GetSqlConnectionString());
+                    await conn.OpenAsync().ConfigureAwait(false);
+                    openMs = step.ElapsedMilliseconds;
+
+                    step.Restart();
+                    using (var cmdDel = conn.CreateCommand())
+                    {
+                        cmdDel.CommandText = $@"
 DELETE FROM {_messagesTableQ} WITH (ROWLOCK)
 WHERE beginstring = @begin
   AND sendercompid = @sender
   AND targetcompid = @target
   AND session_qualifier = @qual;";
+                        AddSessionKeyParams(cmdDel);
+                        deletedRows = await cmdDel.ExecuteNonQueryAsync().ConfigureAwait(false);
+                    }
+                    deleteMs = step.ElapsedMilliseconds;
 
-                            AddSessionKeyParams(cmdDel);
-                            cmdDel.ExecuteNonQuery();
-                        }
-
-                        cache_.Reset();
-                        var time = cache_.CreationTime ?? DateTime.UtcNow;
-
-                        using (var cmdUpd = conn.CreateCommand())
-                        {
-                            cmdUpd.CommandText = $@"
+                    step.Restart();
+                    using (var cmdUpd = conn.CreateCommand())
+                    {
+                        cmdUpd.CommandText = $@"
 UPDATE {_sessionsTableQ} WITH (ROWLOCK)
 SET creation_time = @creation_time,
     incoming_seqnum = @incoming,
@@ -515,102 +606,100 @@ WHERE beginstring = @begin
   AND sendercompid = @sender
   AND targetcompid = @target
   AND session_qualifier = @qual;";
-
-                            AddSessionKeyParams(cmdUpd);
-                            cmdUpd.Parameters.Add("@creation_time", SqlDbType.DateTime2).Value = time;
-                            cmdUpd.Parameters.Add("@incoming", SqlDbType.BigInt).Value = (long)cache_.NextTargetMsgSeqNum;
-                            cmdUpd.Parameters.Add("@outgoing", SqlDbType.BigInt).Value = (long)cache_.NextSenderMsgSeqNum;
-                            cmdUpd.ExecuteNonQuery();
-                        }
-                    });
-                }
-            }
-            finally
-            {
-                // Install a fresh CTS only NOW — after the DELETE is committed and the lock
-                // is about to be released. The background writer cannot acquire _dbWriteLock
-                // until after this point, so it will always see a valid uncancelled token
-                // and will only flush messages enqueued AFTER this Reset() completes.
-                lock (_flushCtsLock)
-                {
-                    _flushCts.Dispose(); // dispose the pre-cancelled one
-                    _flushCts = new CancellationTokenSource();
-                }
-                _dbWriteLock.Release();
-            }
-        }
-
-        // -----------------------------------------------------------------------
-        // Background writer — messages table only
-        // -----------------------------------------------------------------------
-
-        private async Task BackgroundWriterAsync(CancellationToken ct)
-        {
-            var batch = new List<WriteItem>(BatchSize);
-            try
-            {
-                while (await _channel.Reader.WaitToReadAsync(ct).ConfigureAwait(false))
-                {
-                    await Task.Delay(FlushIntervalMs, ct).ConfigureAwait(false);
-
-                    while (_channel.Reader.TryRead(out var item) && batch.Count < BatchSize)
-                        batch.Add(item);
-
-                    if (batch.Count > 0)
-                    {
-                        CancellationToken flushToken;
-                        lock (_flushCtsLock) { flushToken = _flushCts.Token; }
-
-                        await FlushBatchAsync(batch, flushToken).ConfigureAwait(false);
-                        batch.Clear();
+                        AddSessionKeyParams(cmdUpd);
+                        cmdUpd.Parameters.Add("@creation_time", SqlDbType.DateTime2).Value = op.CreationTime;
+                        cmdUpd.Parameters.Add("@incoming", SqlDbType.BigInt).Value = (long)op.NextTargetSeq;
+                        cmdUpd.Parameters.Add("@outgoing", SqlDbType.BigInt).Value = (long)op.NextSenderSeq;
+                        await cmdUpd.ExecuteNonQueryAsync().ConfigureAwait(false);
                     }
-                }
+                    updateMs = step.ElapsedMilliseconds;
+                }).ConfigureAwait(false);
             }
-            catch (OperationCanceledException) { }
-
-            // Drain on shutdown
-            while (_channel.Reader.TryRead(out var item))
-                batch.Add(item);
-            if (batch.Count > 0)
+            catch (Exception ex)
             {
-                CancellationToken flushToken;
-                lock (_flushCtsLock) { flushToken = _flushCts.Token; }
-                await FlushBatchAsync(batch, flushToken).ConfigureAwait(false);
+                failure = ex;
+            }
+
+            LogResetTiming(queueLatencyMs, openMs, deleteMs, updateMs, deletedRows, failure);
+        }
+
+        // -----------------------------------------------------------------------
+        // Reset-timing diagnostic. Routes through the session's ILog so the
+        // message goes wherever the session is configured to log: ScreenLog,
+        // FileLog, SQLLog, CompositeLog — whichever the user set up.
+        //
+        // Runs on the background writer task, so any synchronous cost of the
+        // log call never lands on the session thread.
+        // -----------------------------------------------------------------------
+        private void LogResetTiming(
+            long queueLatencyMs, long openMs, long deleteMs, long updateMs,
+            int deletedRows, Exception? failure)
+        {
+            var status = failure is null
+                ? "OK"
+                : $"FAIL ({failure.GetType().Name}: {failure.Message})";
+
+            var text =
+                $"SQLStore Reset timing: queue_latency={queueLatencyMs}ms " +
+                $"open={openMs}ms delete={deleteMs}ms update={updateMs}ms " +
+                $"deleted_rows={deletedRows} status={status}";
+
+            // Echo to Console too — covers the case where Session hasn't wired up
+            // Log yet (e.g., a startup-time Reset) or the configured log dropped
+            // the event.
+            Console.WriteLine($"{DateTime.UtcNow:O} [{_sender}->{_target}] {text}");
+
+            try { Log?.OnEvent(text); }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"SQLStore [{_sender}->{_target}]: ILog.OnEvent for reset timing failed: {ex.Message}");
             }
         }
 
         // -----------------------------------------------------------------------
-        // FlushBatchAsync — true single-statement batch MERGE
-        //
-        // KEY CHANGE: was N sequential UPDATE+INSERT round-trips (up to 50×~10ms).
-        // Now a single MERGE statement with a VALUES table constructor.
-        // One round-trip regardless of batch size: worst-case latency ~10ms not ~500ms.
-        //
-        // Also takes a CancellationToken so Reset() can abort it quickly.
+        // ApplySetSeqAsync — UPDATE one seqnum column in the sessions row.
         // -----------------------------------------------------------------------
-
-        private async Task FlushBatchAsync(List<WriteItem> batch, CancellationToken ct)
+        private async Task ApplySetSeqAsync(SetSeqOp op)
         {
-            // If ct is already cancelled before we acquire, WaitAsync throws without
-            // taking the lock. The catch returns immediately, so the finally below
-            // is only ever reached when the lock was successfully acquired.
+            var column = op.IsSender ? "outgoing_seqnum" : "incoming_seqnum";
             try
             {
-                await _dbWriteLock.WaitAsync(ct).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                // Reset() cancelled before we even acquired — nothing to release.
-                return;
-            }
+                await ExecuteWithDeadlockRetryAsync(async () =>
+                {
+                    using var conn = new SqlConnection(GetSqlConnectionString());
+                    await conn.OpenAsync().ConfigureAwait(false);
 
+                    using var cmd = conn.CreateCommand();
+                    cmd.CommandText = $@"
+UPDATE {_sessionsTableQ} WITH (ROWLOCK)
+SET {column} = @value
+WHERE beginstring = @begin
+  AND sendercompid = @sender
+  AND targetcompid = @target
+  AND session_qualifier = @qual;";
+                    cmd.Parameters.Add("@value", SqlDbType.BigInt).Value = (long)op.Value;
+                    AddSessionKeyParams(cmd);
+                    await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
+                }).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"SQLStore [{_sender}->{_target}]: SetSeq ({column}) failed: {ex.Message}");
+            }
+        }
+
+        // -----------------------------------------------------------------------
+        // FlushWritesAsync — single-statement MERGE for a batch of WriteMsgOps.
+        //
+        // No more _dbWriteLock / _flushCts: the channel is the serializer now.
+        // -----------------------------------------------------------------------
+        private async Task FlushWritesAsync(List<WriteMsgOp> batch)
+        {
             try
             {
                 using var conn = new SqlConnection(GetSqlConnectionString());
-                await conn.OpenAsync(ct).ConfigureAwait(false);
+                await conn.OpenAsync().ConfigureAwait(false);
 
-                // Build a single MERGE using a VALUES constructor.
-                // e.g. USING (VALUES (@seq0,@msg0),(@seq1,@msg1),...) AS src(seq,msg)
                 var sql = new StringBuilder();
                 sql.Append($@"
 MERGE {_messagesTableQ} WITH (ROWLOCK) AS tgt
@@ -644,26 +733,38 @@ WHEN NOT MATCHED THEN
                     cmd.Parameters.Add($"@msg{i}", SqlDbType.NVarChar, -1).Value = batch[i].Message ?? string.Empty;
                 }
 
-                await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                // Reset() cancelled us — expected, not an error. Rows will be deleted by Reset().
+                await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"SQLStore [{_sender}->{_target}]: FlushBatch error: {ex.Message}");
-            }
-            finally
-            {
-                _dbWriteLock.Release();
+                Console.WriteLine($"SQLStore [{_sender}->{_target}]: FlushWrites error: {ex.Message}");
             }
         }
 
         // -----------------------------------------------------------------------
-        // Helpers (original — unchanged)
+        // Async deadlock-retry helper. Error 1205 is "deadlock victim"; retrying
+        // after a brief random jitter resolves it in almost all cases.
         // -----------------------------------------------------------------------
+        private static async Task ExecuteWithDeadlockRetryAsync(Func<Task> action, int maxRetries = 3)
+        {
+            for (int attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    await action().ConfigureAwait(false);
+                    return;
+                }
+                catch (SqlException ex) when (ex.Number == 1205 && attempt < maxRetries)
+                {
+                    int delayMs = 20 * (1 << attempt) + Random.Shared.Next(10);
+                    await Task.Delay(delayMs).ConfigureAwait(false);
+                }
+            }
+        }
 
+        // -----------------------------------------------------------------------
+        // Helpers
+        // -----------------------------------------------------------------------
         private void AddSessionKeyParams(SqlCommand cmd)
         {
             cmd.Parameters.Add("@begin", SqlDbType.NVarChar, 32).Value = _begin;
