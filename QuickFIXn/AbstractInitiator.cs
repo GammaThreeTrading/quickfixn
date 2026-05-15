@@ -1,4 +1,5 @@
 ﻿using System.Threading;
+using System.Threading.Tasks;
 using System.Collections.Generic;
 using System;
 using QuickFix.Logger;
@@ -199,11 +200,39 @@ namespace QuickFix
             _thread?.Join(5000);
             _thread = null;
 
-            // dispose all sessions and clear all session sets
+            // dispose all sessions and clear all session sets.
+            // Dispose is run in parallel per session so the async SQLStore drain
+            // (up to 5s per store) doesn't accumulate serially and blow SCM's
+            // 30s stop timeout when there are many sessions. Each per-session
+            // Dispose is independent (own log, own store, own writer task); the
+            // only shared mutable state, the static Session.Sessions dictionary,
+            // is already lock-protected at the leaf.
             lock (_sync)
             {
+                // LongRunning hint gets each dispose its own dedicated thread
+                // instead of a pool worker. Avoids ThreadPool ramp-rate
+                // starvation when a high-session-count host disposes many
+                // stores at once — pool grows ~2 threads/sec by default and
+                // some disposes wouldn't start within our 10s ceiling.
+                var disposeTasks = new List<Task>(_sessions.Count);
                 foreach (Session s in _sessions.Values)
-                    s.Dispose();
+                {
+                    var sessionRef = s;
+                    disposeTasks.Add(Task.Factory.StartNew(
+                        () =>
+                        {
+                            try { sessionRef.Dispose(); }
+                            catch (Exception ex)
+                            {
+                                _nonSessionLog.OnEvent(
+                                    $"Error disposing session {sessionRef.SessionID}: {ex.Message}");
+                            }
+                        },
+                        CancellationToken.None,
+                        TaskCreationOptions.LongRunning,
+                        TaskScheduler.Default));
+                }
+                Task.WaitAll(disposeTasks.ToArray(), TimeSpan.FromSeconds(10));
 
                 _sessions.Clear();
                 _sessionIDs.Clear();

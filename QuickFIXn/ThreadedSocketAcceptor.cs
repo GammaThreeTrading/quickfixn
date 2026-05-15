@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace QuickFix
 {
@@ -246,10 +247,32 @@ namespace QuickFix
 
         private void DisposeSessions()
         {
+            // Parallel per-session Dispose so async SQLStore drains (up to 5s
+            // per store) run concurrently rather than accumulating serially.
+            // Caps the total dispose phase at ~10s regardless of session count,
+            // keeping us inside SCM's 30s default stop timeout.
+            // LongRunning hint gets each dispose its own dedicated thread
+            // instead of a pool worker. Avoids ThreadPool ramp-rate starvation
+            // when a high-session-count host disposes many stores at once.
+            var disposeTasks = new List<Task>(_sessions.Count);
             foreach (var session in _sessions.Values)
             {
-                session.Dispose();
+                var sessionRef = session;
+                disposeTasks.Add(Task.Factory.StartNew(
+                    () =>
+                    {
+                        try { sessionRef.Dispose(); }
+                        catch (Exception ex)
+                        {
+                            _nonSessionLog.OnEvent(
+                                $"Error disposing session {sessionRef.SessionID}: {ex.Message}");
+                        }
+                    },
+                    CancellationToken.None,
+                    TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default));
             }
+            Task.WaitAll(disposeTasks.ToArray(), TimeSpan.FromSeconds(10));
         }
 
         #endregion

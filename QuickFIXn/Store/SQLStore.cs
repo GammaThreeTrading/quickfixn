@@ -43,7 +43,14 @@ namespace QuickFix
         private sealed record FlushBarrierOp(TaskCompletionSource<bool> Tcs) : QueueOp;
 
         private const int BatchSize = 50;
-        private const int FlushIntervalMs = 100;
+        // Default writer wake-up debounce. Configurable per session via the
+        // SQLStoreFlushIntervalMs setting; see _flushIntervalMs below.
+        private const int DefaultFlushIntervalMs = 100;
+        // Sanity bounds on the configured value. Below ~10ms the debounce
+        // produces almost no batching benefit; above ~2s the at-risk window
+        // on hard crash grows uncomfortably even for simulator use.
+        private const int MinFlushIntervalMs = 10;
+        private const int MaxFlushIntervalMs = 2000;
         // After an unexpected writer crash, back off briefly before restarting so
         // we don't busy-loop if the crash is deterministic.
         private const int WriterRestartDelayMs = 2000;
@@ -80,6 +87,11 @@ namespace QuickFix
         private string _initialcatalog = string.Empty;
 
         private bool _ignoreAdminMessages = true;
+
+        // Writer wake-up debounce, in milliseconds. Controls the trade-off
+        // between batch size (efficiency) and at-risk window on crash. Read
+        // from session settings at construction; clamped to a sane range.
+        private readonly int _flushIntervalMs;
 
         private readonly string _messagesTableQ;
         private readonly string _sessionsTableQ;
@@ -122,6 +134,11 @@ namespace QuickFix
             if (_sessionSettings.Get(_sessionID).Has(SessionSettings.SQL_STORE_IGNORE_ADMIN_MESSAGES))
                 _ignoreAdminMessages = _sessionSettings.Get(_sessionID).GetBool(SessionSettings.SQL_STORE_IGNORE_ADMIN_MESSAGES);
 
+            int configuredFlushMs = DefaultFlushIntervalMs;
+            if (_sessionSettings.Get(_sessionID).Has(SessionSettings.SQL_STORE_FLUSH_INTERVAL_MS))
+                configuredFlushMs = (int)_sessionSettings.Get(_sessionID).GetLong(SessionSettings.SQL_STORE_FLUSH_INTERVAL_MS);
+            _flushIntervalMs = Math.Clamp(configuredFlushMs, MinFlushIntervalMs, MaxFlushIntervalMs);
+
             _connectionString = connectionString ?? string.Empty;
             _user = user ?? string.Empty;
             _pwd = password ?? string.Empty;
@@ -140,9 +157,66 @@ namespace QuickFix
 
         public void Dispose()
         {
+            // Signal end-of-stream. The writer's outer loop sees the channel
+            // complete, finishes the explicit final-drain block, and returns.
             _channel.Writer.Complete();
-            try { _writerTask?.Wait(TimeSpan.FromSeconds(5)); } catch { }
+
+            var sw = Stopwatch.StartNew();
+            bool drained;
+            Exception? failure = null;
+            try
+            {
+                drained = _writerTask?.Wait(TimeSpan.FromSeconds(5)) ?? true;
+            }
+            catch (Exception ex)
+            {
+                drained = false;
+                failure = ex;
+            }
+            sw.Stop();
+
+            // Best-effort: estimate how much was left when we gave up. Reader
+            // is single-threaded so the count is stable once the wait returns.
+            // (If drained=true the channel is fully consumed; the count is 0.)
+            int pendingAtComplete = 0;
+            if (!drained && _channel.Reader.TryPeek(out _))
+            {
+                // TryPeek confirmed >=1; count by draining a snapshot view.
+                while (_channel.Reader.TryRead(out _)) pendingAtComplete++;
+            }
+
+            LogDisposeOutcome(sw.ElapsedMilliseconds, drained, pendingAtComplete, failure);
+
             _cts.Dispose();
+        }
+
+        // -----------------------------------------------------------------------
+        // Dispose-timing diagnostic. Same routing as LogResetTiming: through the
+        // session's ILog (which is still alive — SessionState disposes the store
+        // before the log) with a Console fallback. Critical for incident triage
+        // after a forced shutdown: did the drain finish, or did SCM cut us off?
+        // -----------------------------------------------------------------------
+        private void LogDisposeOutcome(long elapsedMs, bool drained, int pendingAtComplete, Exception? failure)
+        {
+            string status;
+            if (failure is not null)
+                status = $"FAIL ({failure.GetType().Name}: {failure.Message})";
+            else if (drained)
+                status = "OK";
+            else
+                status = "TIMEOUT";
+
+            var text =
+                $"SQLStore Dispose: drained_in={elapsedMs}ms " +
+                $"pending_at_complete={pendingAtComplete} status={status}";
+
+            Console.WriteLine($"{DateTime.UtcNow:O} [{_sender}->{_target}] {text}");
+
+            try { Log?.OnEvent(text); }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"SQLStore [{_sender}->{_target}]: ILog.OnEvent for dispose outcome failed: {ex.Message}");
+            }
         }
 
         // -----------------------------------------------------------------------
@@ -450,7 +524,7 @@ ORDER BY msgseqnum;";
                     while (await _channel.Reader.WaitToReadAsync(ct).ConfigureAwait(false))
                     {
                         // Brief delay so message bursts coalesce into a single MERGE.
-                        try { await Task.Delay(FlushIntervalMs, ct).ConfigureAwait(false); }
+                        try { await Task.Delay(_flushIntervalMs, ct).ConfigureAwait(false); }
                         catch (OperationCanceledException) { break; }
 
                         while (_channel.Reader.TryRead(out var op))

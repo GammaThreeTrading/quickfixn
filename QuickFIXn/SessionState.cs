@@ -418,8 +418,11 @@ namespace QuickFix
             if (_disposed) return;
             if (disposing)
             {
-                Log.Dispose();
+                // Dispose the store BEFORE the log so the store (notably the
+                // async SQLStore) can emit drain-timing diagnostics through the
+                // session's ILog while it's still alive.
                 MessageStore.Dispose();
+                Log.Dispose();
             }
             _disposed = true;
         }
