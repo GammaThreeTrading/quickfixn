@@ -34,8 +34,11 @@ namespace QuickFix
         // -----------------------------------------------------------------------
         private abstract record QueueOp;
         private sealed record WriteMsgOp(ulong SeqNum, string Message) : QueueOp;
-        private sealed record ResetOp(DateTime CreationTime, ulong NextTargetSeq, ulong NextSenderSeq, DateTime EnqueuedAt) : QueueOp;
-        private sealed record SetSeqOp(bool IsSender, ulong Value) : QueueOp;
+        // ResetOp only carries the slow DELETE for the messages table. The
+        // sessions-table UPDATE (seqnum reset) is done synchronously in
+        // Reset() before the op is enqueued, so the wire-state commitment
+        // for the session row is durable before the session thread proceeds.
+        private sealed record ResetOp(DateTime EnqueuedAt) : QueueOp;
         // FlushBarrierOp lets Get() wait until all prior ops have been applied
         // to SQL before reading. Without it there's a small window where Reset()
         // has updated the cache and enqueued the DELETE but not yet executed it,
@@ -341,12 +344,18 @@ VALUES
         public ulong GetNextSenderMsgSeqNum() => cache_.NextSenderMsgSeqNum;
         public ulong GetNextTargetMsgSeqNum() => cache_.NextTargetMsgSeqNum;
 
+        // Seqnum updates are SYNC. The wire-state commitment must be durable
+        // in SQL before the next action (outbound send / inbound app delivery)
+        // takes effect. Crash recovery then sees correct seqnums and avoids
+        // the cache/SQL divergence that causes broken-session mismatch on
+        // restart. Per-update cost: one SQL UPDATE round trip (~1-3ms local,
+        // ~10-20ms Azure). Bodies remain async via the channel.
         public void SetNextSenderMsgSeqNum(ulong value)
         {
             lock (_storeLock)
             {
                 cache_.NextSenderMsgSeqNum = value;
-                _channel.Writer.TryWrite(new SetSeqOp(IsSender: true, value));
+                ApplySetSeqSync(isSender: true, value);
             }
         }
 
@@ -355,7 +364,7 @@ VALUES
             lock (_storeLock)
             {
                 cache_.NextTargetMsgSeqNum = value;
-                _channel.Writer.TryWrite(new SetSeqOp(IsSender: false, value));
+                ApplySetSeqSync(isSender: false, value);
             }
         }
 
@@ -364,7 +373,7 @@ VALUES
             lock (_storeLock)
             {
                 cache_.IncrNextSenderMsgSeqNum();
-                _channel.Writer.TryWrite(new SetSeqOp(IsSender: true, cache_.NextSenderMsgSeqNum));
+                ApplySetSeqSync(isSender: true, cache_.NextSenderMsgSeqNum);
             }
         }
 
@@ -373,7 +382,7 @@ VALUES
             lock (_storeLock)
             {
                 cache_.IncrNextTargetMsgSeqNum();
-                _channel.Writer.TryWrite(new SetSeqOp(IsSender: false, cache_.NextTargetMsgSeqNum));
+                ApplySetSeqSync(isSender: false, cache_.NextTargetMsgSeqNum);
             }
         }
 
@@ -496,7 +505,17 @@ ORDER BY msgseqnum;";
                 var nextTarget = cache_.NextTargetMsgSeqNum;
                 var nextSender = cache_.NextSenderMsgSeqNum;
 
-                _channel.Writer.TryWrite(new ResetOp(creationTime, nextTarget, nextSender, DateTime.UtcNow));
+                // SYNC: update the sessions row inline. This commits the seqnum
+                // reset before the session thread returns, so subsequent sync
+                // IncrNext writes can't race with an async ResetOp UPDATE
+                // overwriting them. Single-row UPDATE: ~5-10ms; well under the
+                // 60s heartbeat budget on morning logon.
+                ApplyResetUpdateSync(creationTime, nextTarget, nextSender);
+
+                // Async: the slow DELETE on the messages table stays in the
+                // background via ResetOp. Channel ordering ensures DELETE runs
+                // before any post-reset body INSERTs from the session.
+                _channel.Writer.TryWrite(new ResetOp(DateTime.UtcNow));
             }
         }
 
@@ -591,15 +610,6 @@ ORDER BY msgseqnum;";
                     await ApplyResetAsync(r).ConfigureAwait(false);
                     break;
 
-                case SetSeqOp s:
-                    if (writeBatch.Count > 0)
-                    {
-                        await FlushWritesAsync(writeBatch).ConfigureAwait(false);
-                        writeBatch.Clear();
-                    }
-                    await ApplySetSeqAsync(s).ConfigureAwait(false);
-                    break;
-
                 case FlushBarrierOp b:
                     if (writeBatch.Count > 0)
                     {
@@ -625,19 +635,24 @@ ORDER BY msgseqnum;";
         }
 
         // -----------------------------------------------------------------------
-        // ApplyResetAsync — timed so we can root-cause the morning stall
-        // without instrumenting the session thread.
+        // ApplyResetAsync — runs the slow DELETE on the messages table.
         //
-        // Captures: queue latency (enqueue→start), open ms, delete ms, update ms,
-        // rows deleted, and final status. Surfaced via the session's ILog so the
-        // line lands wherever the session normally logs (event_log for SQLLog,
-        // file for FileLog, screen for ScreenLog, etc.).
+        // The sessions-row UPDATE was already done synchronously in Reset(),
+        // so the wire-state commitment for seqnums is durable before this
+        // async work starts. This op only carries the cleanup of old message
+        // bodies, which is the expensive part (4-7s on Azure for a typical
+        // session). Channel ordering ensures this DELETE runs before any
+        // post-reset body INSERTs from the session.
+        //
+        // Diagnostic line surfaces queue latency, open time, and delete time
+        // via the session's ILog (Console fallback). Update column is gone
+        // from the timing report.
         // -----------------------------------------------------------------------
         private async Task ApplyResetAsync(ResetOp op)
         {
             var queueLatencyMs = (long)(DateTime.UtcNow - op.EnqueuedAt).TotalMilliseconds;
             var step = new Stopwatch();
-            long openMs = -1, deleteMs = -1, updateMs = -1;
+            long openMs = -1, deleteMs = -1;
             int deletedRows = -1;
             Exception? failure = null;
 
@@ -647,7 +662,7 @@ ORDER BY msgseqnum;";
                 {
                     // Reset counters for each retry attempt so the log reflects the
                     // attempt that actually succeeded (or last failed).
-                    openMs = -1; deleteMs = -1; updateMs = -1; deletedRows = -1;
+                    openMs = -1; deleteMs = -1; deletedRows = -1;
 
                     step.Restart();
                     using var conn = new SqlConnection(GetSqlConnectionString());
@@ -667,26 +682,6 @@ WHERE beginstring = @begin
                         deletedRows = await cmdDel.ExecuteNonQueryAsync().ConfigureAwait(false);
                     }
                     deleteMs = step.ElapsedMilliseconds;
-
-                    step.Restart();
-                    using (var cmdUpd = conn.CreateCommand())
-                    {
-                        cmdUpd.CommandText = $@"
-UPDATE {_sessionsTableQ} WITH (ROWLOCK)
-SET creation_time = @creation_time,
-    incoming_seqnum = @incoming,
-    outgoing_seqnum = @outgoing
-WHERE beginstring = @begin
-  AND sendercompid = @sender
-  AND targetcompid = @target
-  AND session_qualifier = @qual;";
-                        AddSessionKeyParams(cmdUpd);
-                        cmdUpd.Parameters.Add("@creation_time", SqlDbType.DateTime2).Value = op.CreationTime;
-                        cmdUpd.Parameters.Add("@incoming", SqlDbType.BigInt).Value = (long)op.NextTargetSeq;
-                        cmdUpd.Parameters.Add("@outgoing", SqlDbType.BigInt).Value = (long)op.NextSenderSeq;
-                        await cmdUpd.ExecuteNonQueryAsync().ConfigureAwait(false);
-                    }
-                    updateMs = step.ElapsedMilliseconds;
                 }).ConfigureAwait(false);
             }
             catch (Exception ex)
@@ -694,7 +689,7 @@ WHERE beginstring = @begin
                 failure = ex;
             }
 
-            LogResetTiming(queueLatencyMs, openMs, deleteMs, updateMs, deletedRows, failure);
+            LogResetTiming(queueLatencyMs, openMs, deleteMs, deletedRows, failure);
         }
 
         // -----------------------------------------------------------------------
@@ -706,7 +701,7 @@ WHERE beginstring = @begin
         // log call never lands on the session thread.
         // -----------------------------------------------------------------------
         private void LogResetTiming(
-            long queueLatencyMs, long openMs, long deleteMs, long updateMs,
+            long queueLatencyMs, long openMs, long deleteMs,
             int deletedRows, Exception? failure)
         {
             var status = failure is null
@@ -715,7 +710,7 @@ WHERE beginstring = @begin
 
             var text =
                 $"SQLStore Reset timing: queue_latency={queueLatencyMs}ms " +
-                $"open={openMs}ms delete={deleteMs}ms update={updateMs}ms " +
+                $"open={openMs}ms delete={deleteMs}ms " +
                 $"deleted_rows={deletedRows} status={status}";
 
             // Echo to Console too — covers the case where Session hasn't wired up
@@ -731,17 +726,25 @@ WHERE beginstring = @begin
         }
 
         // -----------------------------------------------------------------------
-        // ApplySetSeqAsync — UPDATE one seqnum column in the sessions row.
+        // ApplySetSeqSync — SYNC UPDATE of one seqnum column in the sessions row.
+        //
+        // Called from inside _storeLock by the four IncrNext/SetNext methods.
+        // The wire-state commitment must be durable in SQL before the session
+        // thread returns and takes the next action (outbound send / inbound
+        // app delivery). Crash recovery then rebuilds correct seqnums on
+        // restart — no broken-session mismatch.
+        //
+        // Per call: one SQL round trip (~1-3ms local SQL, ~10-20ms Azure).
         // -----------------------------------------------------------------------
-        private async Task ApplySetSeqAsync(SetSeqOp op)
+        private void ApplySetSeqSync(bool isSender, ulong value)
         {
-            var column = op.IsSender ? "outgoing_seqnum" : "incoming_seqnum";
+            var column = isSender ? "outgoing_seqnum" : "incoming_seqnum";
             try
             {
-                await ExecuteWithDeadlockRetryAsync(async () =>
+                ExecuteWithDeadlockRetrySync(() =>
                 {
                     using var conn = new SqlConnection(GetSqlConnectionString());
-                    await conn.OpenAsync().ConfigureAwait(false);
+                    conn.Open();
 
                     using var cmd = conn.CreateCommand();
                     cmd.CommandText = $@"
@@ -751,14 +754,85 @@ WHERE beginstring = @begin
   AND sendercompid = @sender
   AND targetcompid = @target
   AND session_qualifier = @qual;";
-                    cmd.Parameters.Add("@value", SqlDbType.BigInt).Value = (long)op.Value;
+                    cmd.Parameters.Add("@value", SqlDbType.BigInt).Value = (long)value;
                     AddSessionKeyParams(cmd);
-                    await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
-                }).ConfigureAwait(false);
+                    cmd.ExecuteNonQuery();
+                });
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"SQLStore [{_sender}->{_target}]: SetSeq ({column}) failed: {ex.Message}");
+                // Sync write failed — cache is correct, SQL is now behind. This
+                // is the exact scenario we're trying to prevent. Log loudly so
+                // ops sees it; on next successful sync write the column will be
+                // updated to a value past the lost increment, so we self-heal
+                // forward (we never write a lower value). The remaining risk
+                // window is "process crashes before next successful sync write."
+                Console.WriteLine($"{DateTime.UtcNow:O} SQLStore [{_sender}->{_target}]: SetSeq sync ({column}={value}) FAILED: {ex.Message}");
+                try { Log?.OnEvent($"SQLStore SetSeq sync ({column}={value}) failed: {ex.Message}"); }
+                catch { /* don't escalate logging failures */ }
+            }
+        }
+
+        // -----------------------------------------------------------------------
+        // ApplyResetUpdateSync — SYNC UPDATE of the sessions row at Reset time.
+        //
+        // Sets creation_time and both seqnums in one round trip. Called from
+        // inside _storeLock by Reset(), before the ResetOp (DELETE only) is
+        // enqueued. Ensures the seqnum reset is durable in SQL before the
+        // session thread proceeds — no race with subsequent sync IncrNext
+        // writes, no race with the async DELETE that follows.
+        // -----------------------------------------------------------------------
+        private void ApplyResetUpdateSync(DateTime creationTime, ulong nextTarget, ulong nextSender)
+        {
+            try
+            {
+                ExecuteWithDeadlockRetrySync(() =>
+                {
+                    using var conn = new SqlConnection(GetSqlConnectionString());
+                    conn.Open();
+
+                    using var cmd = conn.CreateCommand();
+                    cmd.CommandText = $@"
+UPDATE {_sessionsTableQ} WITH (ROWLOCK)
+SET creation_time = @creation_time,
+    incoming_seqnum = @incoming,
+    outgoing_seqnum = @outgoing
+WHERE beginstring = @begin
+  AND sendercompid = @sender
+  AND targetcompid = @target
+  AND session_qualifier = @qual;";
+                    AddSessionKeyParams(cmd);
+                    cmd.Parameters.Add("@creation_time", SqlDbType.DateTime2).Value = creationTime;
+                    cmd.Parameters.Add("@incoming", SqlDbType.BigInt).Value = (long)nextTarget;
+                    cmd.Parameters.Add("@outgoing", SqlDbType.BigInt).Value = (long)nextSender;
+                    cmd.ExecuteNonQuery();
+                });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"{DateTime.UtcNow:O} SQLStore [{_sender}->{_target}]: Reset sync UPDATE FAILED: {ex.Message}");
+                try { Log?.OnEvent($"SQLStore Reset sync UPDATE failed: {ex.Message}"); }
+                catch { /* don't escalate logging failures */ }
+            }
+        }
+
+        // Sync version of the deadlock-retry helper. Mirrors the async one but
+        // blocks the calling thread (which is the session thread for sync
+        // seqnum writes). Used exclusively for the sync-commit code paths.
+        private static void ExecuteWithDeadlockRetrySync(Action action, int maxRetries = 3)
+        {
+            for (int attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    action();
+                    return;
+                }
+                catch (SqlException ex) when (ex.Number == 1205 && attempt < maxRetries)
+                {
+                    int delayMs = 20 * (1 << attempt) + Random.Shared.Next(10);
+                    Thread.Sleep(delayMs);
+                }
             }
         }
 
