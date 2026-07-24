@@ -38,7 +38,15 @@ namespace QuickFix
         // sessions-table UPDATE (seqnum reset) is done synchronously in
         // Reset() before the op is enqueued, so the wire-state commitment
         // for the session row is durable before the session thread proceeds.
-        private sealed record ResetOp(DateTime EnqueuedAt) : QueueOp;
+        // The reset-time values ride along so that, in journal mode, the writer
+        // can re-assert the sessions row after the DELETE (guarding against a
+        // stale mirror flush racing the sync reset UPDATE).
+        private sealed record ResetOp(DateTime EnqueuedAt, DateTime CreationTime, ulong NextTarget, ulong NextSender) : QueueOp;
+        // SeqOp mirrors a seqnum value to the sessions table in journal mode.
+        // Values are absolute (not deltas), so the writer coalesces: only the
+        // latest pending value per direction is written, once per flush cycle,
+        // instead of one UPDATE per message.
+        private sealed record SeqOp(bool IsSender, ulong Value) : QueueOp;
         // FlushBarrierOp lets Get() wait until all prior ops have been applied
         // to SQL before reading. Without it there's a small window where Reset()
         // has updated the cache and enqueued the DELETE but not yet executed it,
@@ -108,6 +116,17 @@ namespace QuickFix
         // thread. The background writer never takes it.
         private readonly object _storeLock = new();
 
+        // Optional local seqnum journal (SQLStoreSeqNumJournal=Y). When present,
+        // seqnum durability moves from a per-message sync SQL UPDATE to a
+        // per-message local file write (microseconds, survives process death),
+        // and the sessions table is mirrored asynchronously via coalesced SeqOps.
+        private readonly SeqNumJournal? _journal;
+
+        // Latest pending mirror values. Touched only by the background writer
+        // thread (SeqOp dispatch + flush), so no locking is needed.
+        private ulong? _mirrorSender;
+        private ulong? _mirrorTarget;
+
         private static readonly Regex SafeIdentifier = new(@"^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.Compiled);
 
         // The session's ILog. Wired by Session after construction so the store can
@@ -149,9 +168,29 @@ namespace QuickFix
             _sessionsTableQ = QuoteName(sessions_table);
             _messagesTableQ = QuoteName(messages_table);
 
+            // Seqnum journal (opt-in). Must be constructed before PopulateCache so
+            // the journal/SQL merge runs on the initial load. First enable on an
+            // existing session: no journal file exists yet, so SQL seeds the
+            // journal — no manual migration of seqnum state is ever needed.
+            if (_sessionSettings.Get(_sessionID).Has(SessionSettings.SQL_STORE_SEQNUM_JOURNAL)
+                && _sessionSettings.Get(_sessionID).GetBool(SessionSettings.SQL_STORE_SEQNUM_JOURNAL))
+            {
+                string journalDir = @"C:\FIXSIMLogs\SeqNumJournals";
+                if (_sessionSettings.Get(_sessionID).Has(SessionSettings.SQL_STORE_SEQNUM_JOURNAL_PATH))
+                    journalDir = _sessionSettings.Get(_sessionID).GetString(SessionSettings.SQL_STORE_SEQNUM_JOURNAL_PATH);
+
+                string sessionKey = $"{_begin}-{_sender}-{_target}" + (_qual.Length > 0 ? "-" + _qual : "");
+                _journal = new SeqNumJournal(journalDir, sessionKey);
+            }
+
             // PopulateCache is sync. It only SELECTs (and at most INSERTs once) on the
             // sessions table — no DELETEs, no contention. Fast even on cold pool.
             PopulateCache();
+
+            lock (_storeLock)
+            {
+                MergeJournalIntoCache();
+            }
 
             // Eager writer start. Reset() and the SetNext* paths enqueue ops, so the
             // writer must be running from the start (no more lazy-on-first-Set).
@@ -190,6 +229,7 @@ namespace QuickFix
 
             LogDisposeOutcome(sw.ElapsedMilliseconds, drained, pendingAtComplete, failure);
 
+            _journal?.Dispose();
             _cts.Dispose();
         }
 
@@ -324,6 +364,65 @@ VALUES
             }
         }
 
+        // -----------------------------------------------------------------------
+        // MergeJournalIntoCache — journal mode only; runs under _storeLock right
+        // after PopulateCache has loaded the sessions row.
+        //
+        // Epoch check: the journal is only trusted if its creation-time stamp
+        // matches the session row's (same session epoch — a Reset or a new day
+        // invalidates old journals). Within a matching epoch seqnums only grow,
+        // so per-direction MAX of journal and SQL is always the correct value:
+        // journal ahead = normal write-behind lag on the mirror; SQL ahead =
+        // exotic machine-loss case where buffered journal writes were lost but
+        // the mirror had flushed further.
+        // -----------------------------------------------------------------------
+        private void MergeJournalIntoCache()
+        {
+            if (_journal is null)
+                return;
+
+            long epochTicks = (cache_.CreationTime ?? DateTime.UtcNow).Ticks;
+
+            if (_journal.TryRead(out long jTicks, out ulong jSender, out ulong jTarget))
+            {
+                if (jTicks == epochTicks)
+                {
+                    bool journalAhead = jSender > cache_.NextSenderMsgSeqNum || jTarget > cache_.NextTargetMsgSeqNum;
+
+                    if (jSender > cache_.NextSenderMsgSeqNum) cache_.NextSenderMsgSeqNum = jSender;
+                    if (jTarget > cache_.NextTargetMsgSeqNum) cache_.NextTargetMsgSeqNum = jTarget;
+
+                    Console.WriteLine(
+                        $"{DateTime.UtcNow:O} SQLStore [{_sender}->{_target}]: SeqNumJournal loaded " +
+                        $"({_journal.Path}) sender={cache_.NextSenderMsgSeqNum} target={cache_.NextTargetMsgSeqNum}" +
+                        (journalAhead ? " (journal was ahead of SQL - mirror catch-up enqueued)" : ""));
+
+                    if (journalAhead)
+                    {
+                        // Bring the sessions row up to date via the writer.
+                        _channel.Writer.TryWrite(new SeqOp(true, cache_.NextSenderMsgSeqNum));
+                        _channel.Writer.TryWrite(new SeqOp(false, cache_.NextTargetMsgSeqNum));
+                    }
+                }
+                else
+                {
+                    Console.WriteLine(
+                        $"{DateTime.UtcNow:O} SQLStore [{_sender}->{_target}]: SeqNumJournal epoch mismatch " +
+                        $"(journal={new DateTime(jTicks, DateTimeKind.Utc):O}, session={new DateTime(epochTicks, DateTimeKind.Utc):O}) " +
+                        "- ignoring journal, SQL wins");
+                }
+            }
+            else
+            {
+                Console.WriteLine(
+                    $"{DateTime.UtcNow:O} SQLStore [{_sender}->{_target}]: SeqNumJournal enabled, seeding from SQL " +
+                    $"({_journal.Path}) sender={cache_.NextSenderMsgSeqNum} target={cache_.NextTargetMsgSeqNum}");
+            }
+
+            // Seed/refresh the journal from the merged state.
+            _journal.Write(epochTicks, cache_.NextSenderMsgSeqNum, cache_.NextTargetMsgSeqNum);
+        }
+
         public void Refresh()
         {
             // NOTE: With write-behind, in-flight ops in the channel haven't reached SQL
@@ -335,6 +434,7 @@ VALUES
             {
                 cache_.Reset();
                 PopulateCache();
+                MergeJournalIntoCache();
             }
         }
 
@@ -344,18 +444,18 @@ VALUES
         public ulong GetNextSenderMsgSeqNum() => cache_.NextSenderMsgSeqNum;
         public ulong GetNextTargetMsgSeqNum() => cache_.NextTargetMsgSeqNum;
 
-        // Seqnum updates are SYNC. The wire-state commitment must be durable
-        // in SQL before the next action (outbound send / inbound app delivery)
-        // takes effect. Crash recovery then sees correct seqnums and avoids
-        // the cache/SQL divergence that causes broken-session mismatch on
-        // restart. Per-update cost: one SQL UPDATE round trip (~1-3ms local,
-        // ~10-20ms Azure). Bodies remain async via the channel.
+        // Seqnum updates are durably persisted before the session thread
+        // proceeds - that invariant is non-negotiable (bad seqnums break
+        // client sessions). What varies is the medium:
+        //   default:      sync SQL UPDATE per update (~1-3ms local, ~10-20ms Azure)
+        //   journal mode: sync local file write (microseconds, survives process
+        //                 death) + coalesced async mirror to the sessions table.
         public void SetNextSenderMsgSeqNum(ulong value)
         {
             lock (_storeLock)
             {
                 cache_.NextSenderMsgSeqNum = value;
-                ApplySetSeqSync(isSender: true, value);
+                PersistSeq(isSender: true, value);
             }
         }
 
@@ -364,7 +464,7 @@ VALUES
             lock (_storeLock)
             {
                 cache_.NextTargetMsgSeqNum = value;
-                ApplySetSeqSync(isSender: false, value);
+                PersistSeq(isSender: false, value);
             }
         }
 
@@ -373,7 +473,7 @@ VALUES
             lock (_storeLock)
             {
                 cache_.IncrNextSenderMsgSeqNum();
-                ApplySetSeqSync(isSender: true, cache_.NextSenderMsgSeqNum);
+                PersistSeq(isSender: true, cache_.NextSenderMsgSeqNum);
             }
         }
 
@@ -382,7 +482,22 @@ VALUES
             lock (_storeLock)
             {
                 cache_.IncrNextTargetMsgSeqNum();
-                ApplySetSeqSync(isSender: false, cache_.NextTargetMsgSeqNum);
+                PersistSeq(isSender: false, cache_.NextTargetMsgSeqNum);
+            }
+        }
+
+        // Called under _storeLock by the four methods above.
+        private void PersistSeq(bool isSender, ulong value)
+        {
+            if (_journal is not null)
+            {
+                long epochTicks = (cache_.CreationTime ?? DateTime.UtcNow).Ticks;
+                _journal.Write(epochTicks, cache_.NextSenderMsgSeqNum, cache_.NextTargetMsgSeqNum);
+                _channel.Writer.TryWrite(new SeqOp(isSender, value));
+            }
+            else
+            {
+                ApplySetSeqSync(isSender, value);
             }
         }
 
@@ -509,13 +624,18 @@ ORDER BY msgseqnum;";
                 // reset before the session thread returns, so subsequent sync
                 // IncrNext writes can't race with an async ResetOp UPDATE
                 // overwriting them. Single-row UPDATE: ~5-10ms; well under the
-                // 60s heartbeat budget on morning logon.
+                // 60s heartbeat budget on morning logon. Reset stays sync-to-SQL
+                // even in journal mode: it's rare, and it anchors the epoch.
                 ApplyResetUpdateSync(creationTime, nextTarget, nextSender);
+
+                // Journal mode: stamp the new epoch so pre-reset journal state
+                // can never be trusted again (epoch check in the merge).
+                _journal?.Write(creationTime.Ticks, nextSender, nextTarget);
 
                 // Async: the slow DELETE on the messages table stays in the
                 // background via ResetOp. Channel ordering ensures DELETE runs
                 // before any post-reset body INSERTs from the session.
-                _channel.Writer.TryWrite(new ResetOp(DateTime.UtcNow));
+                _channel.Writer.TryWrite(new ResetOp(DateTime.UtcNow, creationTime, nextTarget, nextSender));
             }
         }
 
@@ -554,6 +674,7 @@ ORDER BY msgseqnum;";
                             await FlushWritesAsync(writeBatch).ConfigureAwait(false);
                             writeBatch.Clear();
                         }
+                        await FlushSeqMirrorAsync().ConfigureAwait(false);
                     }
 
                     // Channel completed (Dispose called) — drain whatever's left and exit cleanly.
@@ -561,6 +682,7 @@ ORDER BY msgseqnum;";
                         await DispatchOpAsync(op, writeBatch).ConfigureAwait(false);
                     if (writeBatch.Count > 0)
                         await FlushWritesAsync(writeBatch).ConfigureAwait(false);
+                    await FlushSeqMirrorAsync().ConfigureAwait(false);
                     return;
                 }
                 catch (OperationCanceledException)
@@ -601,12 +723,24 @@ ORDER BY msgseqnum;";
                     }
                     break;
 
+                case SeqOp s:
+                    // Coalesce: values are absolute, so only the latest pending
+                    // value per direction matters. Flushed with the next batch
+                    // flush / barrier - one UPDATE per cycle, not per message.
+                    if (s.IsSender) _mirrorSender = s.Value;
+                    else _mirrorTarget = s.Value;
+                    break;
+
                 case ResetOp r:
                     if (writeBatch.Count > 0)
                     {
                         await FlushWritesAsync(writeBatch).ConfigureAwait(false);
                         writeBatch.Clear();
                     }
+                    // Discard stale pre-reset mirror values instead of flushing
+                    // them - they would overwrite the sync reset UPDATE.
+                    _mirrorSender = null;
+                    _mirrorTarget = null;
                     await ApplyResetAsync(r).ConfigureAwait(false);
                     break;
 
@@ -616,8 +750,54 @@ ORDER BY msgseqnum;";
                         await FlushWritesAsync(writeBatch).ConfigureAwait(false);
                         writeBatch.Clear();
                     }
+                    await FlushSeqMirrorAsync().ConfigureAwait(false);
                     b.Tcs.TrySetResult(true);
                     break;
+            }
+        }
+
+        // -----------------------------------------------------------------------
+        // FlushSeqMirrorAsync — journal mode's coalesced sessions-table update.
+        // One UPDATE covering whichever directions have pending values. Runs on
+        // the background writer only.
+        // -----------------------------------------------------------------------
+        private async Task FlushSeqMirrorAsync()
+        {
+            if (_mirrorSender is null && _mirrorTarget is null)
+                return;
+
+            long? sender = (long?)_mirrorSender;
+            long? target = (long?)_mirrorTarget;
+            _mirrorSender = null;
+            _mirrorTarget = null;
+
+            try
+            {
+                await ExecuteWithDeadlockRetryAsync(async () =>
+                {
+                    using var conn = new SqlConnection(GetSqlConnectionString());
+                    await conn.OpenAsync().ConfigureAwait(false);
+
+                    using var cmd = conn.CreateCommand();
+                    cmd.CommandText = $@"
+UPDATE {_sessionsTableQ} WITH (ROWLOCK)
+SET outgoing_seqnum = COALESCE(@outgoing, outgoing_seqnum),
+    incoming_seqnum = COALESCE(@incoming, incoming_seqnum)
+WHERE beginstring = @begin
+  AND sendercompid = @sender
+  AND targetcompid = @target
+  AND session_qualifier = @qual;";
+                    cmd.Parameters.Add("@outgoing", SqlDbType.BigInt).Value = (object?)sender ?? DBNull.Value;
+                    cmd.Parameters.Add("@incoming", SqlDbType.BigInt).Value = (object?)target ?? DBNull.Value;
+                    AddSessionKeyParams(cmd);
+                    await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
+                }).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // Mirror is behind; the journal remains authoritative locally and
+                // a later flush writes a newer (higher) value. Log and move on.
+                LogWriterError($"seqnum mirror flush failed (outgoing={sender}, incoming={target}): {ex.Message}");
             }
         }
 
@@ -688,6 +868,13 @@ WHERE beginstring = @begin
             {
                 failure = ex;
             }
+
+            // Journal mode: re-assert the sessions row with the reset-time values.
+            // Guards against any stale mirror UPDATE that raced the sync reset
+            // UPDATE before this op was reached; channel ordering guarantees this
+            // runs after it, restoring the correct post-reset state. Idempotent.
+            if (_journal is not null && failure is null)
+                ApplyResetUpdateSync(op.CreationTime, op.NextTarget, op.NextSender);
 
             LogResetTiming(queueLatencyMs, openMs, deleteMs, deletedRows, failure);
         }

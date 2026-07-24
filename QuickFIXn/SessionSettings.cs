@@ -100,6 +100,8 @@ public class SessionSettings
     public const string SQL_STORE_DATASOURCE = "SQLStoreDatasource";
     public const string SQL_STORE_INITIAL_CATALOG = "SQLStoreInitialCatalog";
     public const string SQL_STORE_FLUSH_INTERVAL_MS = "SQLStoreFlushIntervalMs";
+    public const string SQL_STORE_SEQNUM_JOURNAL = "SQLStoreSeqNumJournal";
+    public const string SQL_STORE_SEQNUM_JOURNAL_PATH = "SQLStoreSeqNumJournalPath";
     public const string SQL_LOG_DATASOURCE = "SQLLogDatasource";
     public const string SQL_LOG_INITIAL_CATALOG = "SQLLogInitialCatalog";
     public const string SQL_LOG_ERROR_PATH = "SQLLogErrorPath";
