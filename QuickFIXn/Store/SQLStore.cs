@@ -383,9 +383,16 @@ VALUES
 
             long epochTicks = (cache_.CreationTime ?? DateTime.UtcNow).Ticks;
 
+            // Tolerance: creation_time round-trips through SQL storage, and a
+            // datetime column rounds to ~3.33ms. An exact-ticks comparison would
+            // reject every legitimate journal after a Reset. 10ms covers datetime
+            // rounding with margin while still rejecting genuinely stale epochs
+            // (different session days are hours apart, not milliseconds).
+            const long EpochToleranceTicks = 10 * TimeSpan.TicksPerMillisecond;
+
             if (_journal.TryRead(out long jTicks, out ulong jSender, out ulong jTarget))
             {
-                if (jTicks == epochTicks)
+                if (Math.Abs(jTicks - epochTicks) <= EpochToleranceTicks)
                 {
                     bool journalAhead = jSender > cache_.NextSenderMsgSeqNum || jTarget > cache_.NextTargetMsgSeqNum;
 
@@ -406,10 +413,20 @@ VALUES
                 }
                 else
                 {
+                    // Log the discarded journal values BEFORE the rewrite below
+                    // destroys them - if the journal held HIGHER seqnums than SQL,
+                    // this line is the forensic record of a likely real problem
+                    // (that combination is the signature of stale-mirror + wrongly
+                    // rejected journal), so shout accordingly.
+                    bool journalWasAhead = jSender > cache_.NextSenderMsgSeqNum || jTarget > cache_.NextTargetMsgSeqNum;
                     Console.WriteLine(
                         $"{DateTime.UtcNow:O} SQLStore [{_sender}->{_target}]: SeqNumJournal epoch mismatch " +
-                        $"(journal={new DateTime(jTicks, DateTimeKind.Utc):O}, session={new DateTime(epochTicks, DateTimeKind.Utc):O}) " +
-                        "- ignoring journal, SQL wins");
+                        $"(journal={new DateTime(jTicks, DateTimeKind.Utc):O} sender={jSender} target={jTarget}, " +
+                        $"session={new DateTime(epochTicks, DateTimeKind.Utc):O} sender={cache_.NextSenderMsgSeqNum} target={cache_.NextTargetMsgSeqNum}) " +
+                        "- ignoring journal, SQL wins" +
+                        (journalWasAhead ? " *** WARNING: discarded journal seqnums were HIGHER than SQL - investigate before trusting this session's seqnums ***" : ""));
+                    try { Log?.OnEvent($"SeqNumJournal epoch mismatch - SQL wins (journal sender={jSender} target={jTarget}, sql sender={cache_.NextSenderMsgSeqNum} target={cache_.NextTargetMsgSeqNum})" + (journalWasAhead ? " WARNING: journal was ahead" : "")); }
+                    catch { }
                 }
             }
             else
@@ -795,9 +812,14 @@ WHERE beginstring = @begin
             }
             catch (Exception ex)
             {
-                // Mirror is behind; the journal remains authoritative locally and
-                // a later flush writes a newer (higher) value. Log and move on.
-                LogWriterError($"seqnum mirror flush failed (outgoing={sender}, incoming={target}): {ex.Message}");
+                // Put the values back so the next cycle retries. Without this, a
+                // transient failure on the LAST flush of a session (e.g. right
+                // after logout, when no further messages will arrive to refresh
+                // the pending values) would leave the sessions row stale forever.
+                // ??= keeps any newer value that arrived while we were failing.
+                _mirrorSender ??= (ulong?)sender;
+                _mirrorTarget ??= (ulong?)target;
+                LogWriterError($"seqnum mirror flush failed (outgoing={sender}, incoming={target}) - will retry: {ex.Message}");
             }
         }
 
