@@ -1,4 +1,4 @@
-QuickFIXn.suo
+﻿QuickFIXn.suo
 QuickFIXn/bin/*
 QuickFIXn/obj/*
 UnitTests/bin/*
@@ -169,4 +169,9 @@ FakesAssemblies/
 # stuff from the gh-pages branch I guess
 .sass-cache/
 _site/
+
+
+.claude/
+MyBranch.zip
+UpstreamSandbox.zip
 
