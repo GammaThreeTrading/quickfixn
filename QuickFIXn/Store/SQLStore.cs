@@ -1135,7 +1135,7 @@ WHEN NOT MATCHED THEN
                 for (int i = 0; i < batch.Count; i++)
                 {
                     cmd.Parameters.Add($"@seq{i}", SqlDbType.BigInt).Value = (long)batch[i].SeqNum;
-                    cmd.Parameters.Add($"@msg{i}", SqlDbType.NVarChar, -1).Value = batch[i].Message ?? string.Empty;
+                    cmd.Parameters.Add($"@msg{i}", SqlDbType.VarChar, -1).Value = batch[i].Message ?? string.Empty;
                 }
 
                 await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
@@ -1172,10 +1172,18 @@ WHEN NOT MATCHED THEN
         // -----------------------------------------------------------------------
         private void AddSessionKeyParams(SqlCommand cmd)
         {
-            cmd.Parameters.Add("@begin", SqlDbType.NVarChar, 32).Value = _begin;
-            cmd.Parameters.Add("@sender", SqlDbType.NVarChar, 64).Value = _sender;
-            cmd.Parameters.Add("@target", SqlDbType.NVarChar, 64).Value = _target;
-            cmd.Parameters.Add("@qual", SqlDbType.NVarChar, 64).Value = _qual;
+            // VarChar, NOT NVarChar: the session-key columns are varchar, and an
+            // nvarchar parameter forces CONVERT_IMPLICIT on the COLUMN side,
+            // turning every keyed seek (Reset DELETE, resend Get, MERGE ON,
+            // seqnum UPDATE) into a full scan of the messages table. Measured on
+            // Azure staging: a zero-row Reset DELETE took 10.4s scanning 1.58M
+            // rows; with matching types it is a millisecond seek. VarChar is safe
+            // even against an nvarchar column (the parameter promotes, the seek
+            // survives), and FIX comp IDs are ASCII by spec.
+            cmd.Parameters.Add("@begin", SqlDbType.VarChar, 32).Value = _begin;
+            cmd.Parameters.Add("@sender", SqlDbType.VarChar, 64).Value = _sender;
+            cmd.Parameters.Add("@target", SqlDbType.VarChar, 64).Value = _target;
+            cmd.Parameters.Add("@qual", SqlDbType.VarChar, 64).Value = _qual;
         }
 
         private static string QuoteName(string tableName)

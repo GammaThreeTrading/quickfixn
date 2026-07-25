@@ -492,10 +492,13 @@ WHERE beginstring = @begin
 
         private void AddBackupParams(SqlCommand cmd, DateTime cutoffUtc)
         {
-            cmd.Parameters.Add(new SqlParameter("@begin", SqlDbType.NVarChar, 32) { Value = (object?)_begin ?? DBNull.Value });
-            cmd.Parameters.Add(new SqlParameter("@sender", SqlDbType.NVarChar, 64) { Value = (object?)_sender ?? DBNull.Value });
-            cmd.Parameters.Add(new SqlParameter("@target", SqlDbType.NVarChar, 64) { Value = (object?)_target ?? DBNull.Value });
-            cmd.Parameters.Add(new SqlParameter("@qual", SqlDbType.NVarChar, 64) { IsNullable = true, Value = (object?)_qual ?? DBNull.Value });
+            // VarChar, not NVarChar - see AddSessionKeyParams in SQLStore: an
+            // nvarchar param against varchar columns forces a column-side
+            // convert and full-table scans on messages_log/event_log predicates.
+            cmd.Parameters.Add(new SqlParameter("@begin", SqlDbType.VarChar, 32) { Value = (object?)_begin ?? DBNull.Value });
+            cmd.Parameters.Add(new SqlParameter("@sender", SqlDbType.VarChar, 64) { Value = (object?)_sender ?? DBNull.Value });
+            cmd.Parameters.Add(new SqlParameter("@target", SqlDbType.VarChar, 64) { Value = (object?)_target ?? DBNull.Value });
+            cmd.Parameters.Add(new SqlParameter("@qual", SqlDbType.VarChar, 64) { IsNullable = true, Value = (object?)_qual ?? DBNull.Value });
             cmd.Parameters.Add(new SqlParameter("@cutoff", SqlDbType.DateTime2) { Value = cutoffUtc });
         }
 
