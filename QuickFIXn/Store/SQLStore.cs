@@ -133,7 +133,49 @@ namespace QuickFix
         // surface diagnostic events (e.g., Reset timings) through whatever log the
         // session is configured with — ScreenLog, FileLog, SQLLog, or Composite.
         // Null until Session wires it; in that case diagnostics fall back to Console.
-        public ILog? Log { get; set; }
+        //
+        // Constructor-time diagnostics (journal merge, seeding, epoch mismatch)
+        // happen before wiring, so they are buffered and replayed into the log
+        // the moment it is attached — otherwise they exist only in a console
+        // window nobody captured (learned the hard way in the first kill test).
+        private ILog? _log;
+        private readonly List<string> _pendingDiagnostics = new();
+
+        public ILog? Log
+        {
+            get => _log;
+            set
+            {
+                _log = value;
+                if (_log is null)
+                    return;
+                lock (_pendingDiagnostics)
+                {
+                    foreach (var line in _pendingDiagnostics)
+                    {
+                        try { _log.OnEvent(line); } catch { }
+                    }
+                    _pendingDiagnostics.Clear();
+                }
+            }
+        }
+
+        // Console immediately; session log now or when it gets wired.
+        private void Diagnostic(string text)
+        {
+            Console.WriteLine($"{DateTime.UtcNow:O} SQLStore [{_sender}->{_target}]: {text}");
+            if (_log is not null)
+            {
+                try { _log.OnEvent(text); } catch { }
+            }
+            else
+            {
+                lock (_pendingDiagnostics)
+                {
+                    _pendingDiagnostics.Add(text);
+                }
+            }
+        }
 
         public SQLStore(SessionID sessionId, string user, string password, string connectionString, SessionSettings settings)
         {
@@ -399,9 +441,8 @@ VALUES
                     if (jSender > cache_.NextSenderMsgSeqNum) cache_.NextSenderMsgSeqNum = jSender;
                     if (jTarget > cache_.NextTargetMsgSeqNum) cache_.NextTargetMsgSeqNum = jTarget;
 
-                    Console.WriteLine(
-                        $"{DateTime.UtcNow:O} SQLStore [{_sender}->{_target}]: SeqNumJournal loaded " +
-                        $"({_journal.Path}) sender={cache_.NextSenderMsgSeqNum} target={cache_.NextTargetMsgSeqNum}" +
+                    Diagnostic(
+                        $"SeqNumJournal loaded ({_journal.Path}) sender={cache_.NextSenderMsgSeqNum} target={cache_.NextTargetMsgSeqNum}" +
                         (journalAhead ? " (journal was ahead of SQL - mirror catch-up enqueued)" : ""));
 
                     if (journalAhead)
@@ -419,21 +460,19 @@ VALUES
                     // (that combination is the signature of stale-mirror + wrongly
                     // rejected journal), so shout accordingly.
                     bool journalWasAhead = jSender > cache_.NextSenderMsgSeqNum || jTarget > cache_.NextTargetMsgSeqNum;
-                    Console.WriteLine(
-                        $"{DateTime.UtcNow:O} SQLStore [{_sender}->{_target}]: SeqNumJournal epoch mismatch " +
+                    Diagnostic(
+                        $"SeqNumJournal epoch mismatch " +
                         $"(journal={new DateTime(jTicks, DateTimeKind.Utc):O} sender={jSender} target={jTarget}, " +
                         $"session={new DateTime(epochTicks, DateTimeKind.Utc):O} sender={cache_.NextSenderMsgSeqNum} target={cache_.NextTargetMsgSeqNum}) " +
                         "- ignoring journal, SQL wins" +
                         (journalWasAhead ? " *** WARNING: discarded journal seqnums were HIGHER than SQL - investigate before trusting this session's seqnums ***" : ""));
-                    try { Log?.OnEvent($"SeqNumJournal epoch mismatch - SQL wins (journal sender={jSender} target={jTarget}, sql sender={cache_.NextSenderMsgSeqNum} target={cache_.NextTargetMsgSeqNum})" + (journalWasAhead ? " WARNING: journal was ahead" : "")); }
-                    catch { }
                 }
             }
             else
             {
-                Console.WriteLine(
-                    $"{DateTime.UtcNow:O} SQLStore [{_sender}->{_target}]: SeqNumJournal enabled, seeding from SQL " +
-                    $"({_journal.Path}) sender={cache_.NextSenderMsgSeqNum} target={cache_.NextTargetMsgSeqNum}");
+                Diagnostic(
+                    $"SeqNumJournal enabled, seeding from SQL ({_journal.Path}) " +
+                    $"sender={cache_.NextSenderMsgSeqNum} target={cache_.NextTargetMsgSeqNum}");
             }
 
             // Seed/refresh the journal from the merged state.
