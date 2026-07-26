@@ -219,14 +219,13 @@ namespace QuickFix
             {
                 // Default resolution order:
                 //   1. explicit SQLStoreSeqNumJournalPath session setting
-                //   2. FIXSIM_SEQNUM_JOURNAL_DIR environment variable - the host
-                //      process sets this per instance (e.g. C:\FIXSIMLogs\<Instance>\journal)
-                //      so journals land beside the instance's other files without
-                //      every cfg needing the path
-                //   3. flat fallback for non-FIXSIM hosts of this fork
-                string? journalDir = Environment.GetEnvironmentVariable("FIXSIM_SEQNUM_JOURNAL_DIR");
+                //   2. QUICKFIX_SEQNUM_JOURNAL_DIR environment variable - a hosting
+                //      application may set this per process so journals land in a
+                //      location of its choosing without every cfg naming the path
+                //   3. a "seqjournals" folder beside the application
+                string? journalDir = Environment.GetEnvironmentVariable("QUICKFIX_SEQNUM_JOURNAL_DIR");
                 if (string.IsNullOrWhiteSpace(journalDir))
-                    journalDir = @"C:\FIXSIMLogs\SeqNumJournals";
+                    journalDir = System.IO.Path.Combine(AppContext.BaseDirectory, "seqjournals");
                 if (_sessionSettings.Get(_sessionID).Has(SessionSettings.SQL_STORE_SEQNUM_JOURNAL_PATH))
                     journalDir = _sessionSettings.Get(_sessionID).GetString(SessionSettings.SQL_STORE_SEQNUM_JOURNAL_PATH);
 

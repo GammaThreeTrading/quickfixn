@@ -56,7 +56,15 @@ namespace QuickFix
             }
 
             if (0 == _sessions.Count)
-                throw new ConfigError("No sessions defined for initiator");
+            {
+                // Sessions can be disabled by the hosting application (SESSION_DISABLED),
+                // and disabled sessions are removed before Start(). An initiator with
+                // zero sessions must still start so the process (and its WCF control
+                // endpoint) stays up - otherwise a client with all sessions disabled
+                // can never re-enable them. The connect loop idles until AddSession.
+                _nonSessionLog.OnEvent(
+                    "No initiator sessions at startup (all removed/disabled) - initiator will idle until a session is added dynamically.");
+            }
 
             // start it up
             IsStopped = false;
