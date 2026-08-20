@@ -196,6 +196,15 @@ namespace QuickFix
         {
             client.LingerState = new LingerOption(false, 0);
             client.NoDelay = socketSettings.SocketNodelay;
+
+            // TCP keepalive so the OS reaps connections whose peer died without a FIN/RST
+            // (NAT drops, crashed clients). Without it an idle ESTABLISHED socket is held
+            // forever; heartbeat enforcement only covers sockets bound to a logged-on
+            // session. Probe after 120s idle, every 10s, drop after 5 failed probes.
+            client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+            client.Client.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveTime, 120);
+            client.Client.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveInterval, 10);
+            client.Client.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveRetryCount, 5);
             if (socketSettings.SocketReceiveBufferSize.HasValue)
             {
                 client.ReceiveBufferSize = socketSettings.SocketReceiveBufferSize.Value;

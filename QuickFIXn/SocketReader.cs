@@ -11,7 +11,19 @@ namespace QuickFix;
 public class SocketReader : IDisposable
 {
     public const int BUF_SIZE = 4096;
+
+    /// <summary>
+    /// A connection that has not established a session within this window is dropped.
+    /// Without this, a peer that connects and never sends a parseable message (crashed
+    /// client, port scanner, leaky reconnect loop) is held forever: the read loop's
+    /// timeout branch has no Session to enforce LogonTimeout on, so the socket and its
+    /// dedicated handler thread leak until process restart.
+    /// </summary>
+    public const int PreLogonDisconnectSeconds = 30;
+
     private readonly byte[] _readBuffer = new byte[BUF_SIZE];
+    private readonly DateTime _connectedUtc = DateTime.UtcNow;
+    private readonly string _remoteEndPoint;
     private readonly Parser _parser = new();
     private Session? _qfSession;
     private readonly Stream _stream;
@@ -36,6 +48,7 @@ public class SocketReader : IDisposable
         _tcpClient = tcpClient;
         _responder = responder;
         _acceptorDescriptor = acceptorDescriptor;
+        _remoteEndPoint = tcpClient.Client.RemoteEndPoint?.ToString() ?? "unknown";
         _stream = Transport.StreamFactory.CreateServerStream(tcpClient, settings, nonSessionLog);
         _nonSessionLog = nonSessionLog;
     }
@@ -51,6 +64,14 @@ public class SocketReader : IDisposable
                 _qfSession?.Next();
 
             ProcessStream();
+
+            // Checked after ProcessStream so a Logon in this read binds the session
+            // before the deadline is enforced.
+            if (_qfSession is null && DateTime.UtcNow.Subtract(_connectedUtc).TotalSeconds > PreLogonDisconnectSeconds)
+            {
+                LogEvent($"Disconnecting {_remoteEndPoint}: no session established within {PreLogonDisconnectSeconds}s of connect (pre-logon timeout)");
+                DisconnectClient();
+            }
         }
         catch (MessageParseError e)
         {
