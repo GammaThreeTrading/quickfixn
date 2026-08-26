@@ -356,8 +356,21 @@ namespace QuickFix
                 else
                     return false; // session already exists
 
-            if (CreateSession(sessionId, dict))
-                return true;
+            try
+            {
+                if (CreateSession(sessionId, dict))
+                    return true;
+            }
+            catch
+            {
+                // CreateSession can throw (e.g. the message store failed to
+                // open). Without this cleanup the id stays in _settings with no
+                // session behind it, and every later AddSession for it returns
+                // false at the exists-check above — unrecoverable until restart.
+                lock (_settings)
+                    _settings.Remove(sessionId);
+                throw;
+            }
 
             lock (_settings) // failed to create session, so remove from settings
                 _settings.Remove(sessionId);
