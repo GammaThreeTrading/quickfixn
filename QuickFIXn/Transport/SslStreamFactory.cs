@@ -205,7 +205,10 @@ internal sealed class SslStreamFactory
         // statuses that flag expects. Without this check SSLCACertificate was never enforced.
         if (isValid && !ChainIsAnchoredBy(chain0, cert, out string chainProblem))
         {
-            _nonSessionLog.OnEvent($"Remote certificate chain is not anchored by '{caCertPath}': {chainProblem}");
+            // Name the remote cert so an operator can tell WHICH CA the counterparty is really using.
+            var remote = (X509Certificate2)certificate;
+            _nonSessionLog.OnEvent(
+                $"Remote certificate '{remote.Subject}' (issuer '{remote.Issuer}', thumbprint {remote.Thumbprint}) chain is not anchored by '{caCertPath}': {chainProblem}");
             isValid = false;
         }
 
