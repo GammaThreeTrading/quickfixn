@@ -193,11 +193,24 @@ internal sealed class SslStreamFactory
 
         X509Chain chain0 = new X509Chain();
         chain0.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
-        // add all your extra certificate chain
-
+        // The configured CA is a private anchor that is normally NOT in the machine's trusted root
+        // store, so let the chain build up to an unknown authority...
         chain0.ChainPolicy.ExtraStore.Add(cert);
         chain0.ChainPolicy.VerificationFlags = X509VerificationFlags.AllowUnknownCertificateAuthority;
         bool isValid = chain0.Build((X509Certificate2)certificate);
+
+        // ...but AllowUnknownCertificateAuthority also masks PartialChain, so Build() returns true for a
+        // leaf whose issuer is unknown altogether. The chain is only acceptable if it actually passes
+        // through the configured CA (as root or intermediate) and reports nothing worse than the two
+        // statuses that flag expects. Without this check SSLCACertificate was never enforced.
+        if (isValid && !ChainIsAnchoredBy(chain0, cert, out string chainProblem))
+        {
+            // Name the remote cert so an operator can tell WHICH CA the counterparty is really using.
+            var remote = (X509Certificate2)certificate;
+            _nonSessionLog.OnEvent(
+                $"Remote certificate '{remote.Subject}' (issuer '{remote.Issuer}', thumbprint {remote.Thumbprint}) chain is not anchored by '{caCertPath}': {chainProblem}");
+            isValid = false;
+        }
 
         if (isValid)
         {
@@ -217,6 +230,52 @@ internal sealed class SslStreamFactory
         }
 
         // No errors found accept the certificate
+        return true;
+    }
+
+    /// <summary>
+    /// True when a built chain passes through <paramref name="caCert"/> and carries no status other than
+    /// the ones AllowUnknownCertificateAuthority is meant to tolerate (UntrustedRoot, PartialChain above
+    /// the anchor). Internal so the unit tests can exercise it with certificate files.
+    /// </summary>
+    /// <param name="chain">A chain on which Build() has already returned true.</param>
+    /// <param name="caCert">The configured SSLCACertificate.</param>
+    /// <param name="problem">Why the chain was rejected; empty when accepted.</param>
+    internal static bool ChainIsAnchoredBy(X509Chain chain, X509Certificate2 caCert, out string problem)
+    {
+        bool anchored = false;
+        foreach (X509ChainElement element in chain.ChainElements)
+        {
+            if (string.Equals(element.Certificate.Thumbprint, caCert.Thumbprint, StringComparison.OrdinalIgnoreCase))
+            {
+                anchored = true;
+                break;
+            }
+        }
+
+        if (!anchored)
+        {
+            problem = chain.ChainElements.Count <= 1
+                ? "issuer not found (partial chain)"
+                : $"chain terminates at '{chain.ChainElements[chain.ChainElements.Count - 1].Certificate.Subject}'";
+            return false;
+        }
+
+        foreach (X509ChainStatus status in chain.ChainStatus)
+        {
+            switch (status.Status)
+            {
+                case X509ChainStatusFlags.NoError:
+                case X509ChainStatusFlags.UntrustedRoot:
+                case X509ChainStatusFlags.PartialChain:
+                    continue;
+                default:
+                    problem = $"{status.Status}: {status.StatusInformation?.Trim()}";
+                    return false;
+            }
+        }
+
+        problem = string.Empty;
         return true;
     }
 
