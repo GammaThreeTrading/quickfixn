@@ -87,6 +87,41 @@ namespace UnitTests
         }
 
         [Test]
+        public void SelfSignedLeaf_PinnedAsItsOwnAnchor_IsAccepted()
+        {
+            // The counterparty uses a self-signed client cert and the operator configures THAT cert
+            // as SSLCACertificate (the Quantifeed/QFEED2 shape, 2025).
+            using var selfSigned = MakeSelfSignedClient("mTls-Counterparty");
+            var chain = BuildLikeTheFactory(selfSigned, selfSigned);
+
+            Assert.That(SslStreamFactory.ChainIsAnchoredBy(chain, selfSigned, out string problem), Is.True, problem);
+        }
+
+        [Test]
+        public void SelfSignedLeaf_AgainstAnUnrelatedAnchor_IsRejected()
+        {
+            // Same self-signed client cert, but SSLCACertificate points at some other root.
+            // Before the fix this was accepted: Build() succeeds for a self-signed leaf under
+            // AllowUnknownCertificateAuthority and nothing compared it to the configured anchor.
+            using var selfSigned = MakeSelfSignedClient("mTls-Counterparty");
+            using var unrelatedRoot = MakeCa("TestRootCertificate");
+            var chain = BuildLikeTheFactory(selfSigned, unrelatedRoot);
+
+            Assert.That(SslStreamFactory.ChainIsAnchoredBy(chain, unrelatedRoot, out string problem), Is.False);
+            Assert.That(problem, Does.Contain("partial chain"));
+        }
+
+        private static X509Certificate2 MakeSelfSignedClient(string cn)
+        {
+            using RSA key = RSA.Create(2048);
+            var req = new CertificateRequest($"CN={cn}", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            req.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
+            req.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, true));
+            req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { ClientAuth }, true));
+            return req.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(10));
+        }
+
+        [Test]
         public void ConfiguredIntermediate_IsAnchored_WhenChainPassesThroughIt()
         {
             using var root = MakeCa("Root CA");
