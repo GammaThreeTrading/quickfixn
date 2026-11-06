@@ -85,7 +85,7 @@ internal sealed class SslStreamFactory
                 throw new Exception($"No server certificate specified, the {SessionSettings.SSL_CERTIFICATE} setting must be configured");
 
             // Setup secure SSL Communication
-            X509Certificate2? serverCertificate = SslCertCache.LoadCertificate(_socketSettings.CertificatePath, _socketSettings.CertificatePassword);
+            X509Certificate2? serverCertificate = SslCertCache.LoadCertificate(_socketSettings.CertificatePath, _socketSettings.CertificatePassword, _nonSessionLog.OnEvent);
             if (serverCertificate is null) {
                 throw new AuthenticationException("Failed to load ServerCertificate");
             }
@@ -113,7 +113,7 @@ internal sealed class SslStreamFactory
         var rv = new X509Certificate2Collection();
         if (!string.IsNullOrEmpty(_socketSettings.CertificatePath))
         {
-            X509Certificate2? clientCert = SslCertCache.LoadCertificate(_socketSettings.CertificatePath, _socketSettings.CertificatePassword);
+            X509Certificate2? clientCert = SslCertCache.LoadCertificate(_socketSettings.CertificatePath, _socketSettings.CertificatePassword, _nonSessionLog.OnEvent);
             if (clientCert is not null)
                 rv.Add(clientCert);
         }
@@ -184,7 +184,7 @@ internal sealed class SslStreamFactory
         string caCertPath = StringUtil.FixSlashes(_socketSettings.CACertificatePath);
 
         // If CA Certificate is specified then validate against the CA certificate, otherwise it is validated against the installed certificates
-        X509Certificate2? cert = SslCertCache.LoadCertificate(caCertPath, null);
+        X509Certificate2? cert = SslCertCache.LoadCertificate(caCertPath, null, _nonSessionLog.OnEvent);
         if (cert is null) {
             _nonSessionLog.OnEvent(
                 $"Certificate '{caCertPath}' could not be loaded from store or path '{Directory.GetCurrentDirectory()}'");
