@@ -111,7 +111,7 @@ public class SessionDynamicTest
         }
     }
 
-    private void StartEngine(bool initiator, bool twoSessions = false)
+    private void StartEngine(bool initiator, bool twoSessions = false, bool staticInitiatorSession = true)
     {
         TestApplication application = new TestApplication(LogonCallback, LogoffCallback);
         IMessageStoreFactory storeFactory = new MemoryStoreFactory();
@@ -132,8 +132,9 @@ public class SessionDynamicTest
         if (initiator)
         {
             defaults.SetString(SessionSettings.RECONNECT_INTERVAL, "1");
-            settings.Set(CreateSessionId(StaticInitiatorCompId), CreateSessionConfig(true));
-            _initiator = new SocketInitiator(application, storeFactory, settings, logFactory);
+            if (staticInitiatorSession)
+                settings.Set(CreateSessionId(StaticInitiatorCompId), CreateSessionConfig(true));
+            _initiator =new SocketInitiator(application, storeFactory, settings, logFactory);
             _initiator.Start();
         }
         else
@@ -517,5 +518,36 @@ public class SessionDynamicTest
 
         // Check that log directory default setting has been effective
         Assert.That(System.IO.Directory.GetFiles(_logPath, QuickFix.Values.BeginString_FIX42 + "*.log").Length, Is.GreaterThan(0));
+    }
+
+    [Test]
+    public void InitiatorStartsWithNoSessionsAndAcceptsDynamicSession()
+    {
+        // An empty initiator writes to the non-session log as soon as it starts, so use a
+        // log directory of its own: the previous test's log file may not be released yet.
+        _logPath = Path.Combine(TestContext.CurrentContext.TestDirectory, "log-empty-initiator");
+        ClearLogs();
+
+        StartListener();
+
+        // No [SESSION] at all: construction and Start() must both succeed
+        Assert.DoesNotThrow(() => StartEngine(true, staticInitiatorSession: false));
+        if (_initiator is null)
+            throw new AssertionException("_initiator is null");
+        Assert.That(_initiator.IsStopped, Is.False, "Empty initiator did not start");
+        Assert.That(_initiator.GetSessionIDs(), Is.Empty);
+
+        // The first session added dynamically connects and logs on
+        string dynamicCompId = "ini30";
+        var sessionId = CreateSessionId(dynamicCompId);
+        Assert.That(_initiator.AddSession(sessionId, CreateSessionConfig(true)), Is.True, "Failed to add first session to empty initiator");
+        Assert.That(WaitForLogonMessage(dynamicCompId), Is.True, "Failed to get logon message for session added to empty initiator");
+        SendInitiatorLogon(dynamicCompId);
+        Assert.That(WaitForLogonStatus(dynamicCompId), Is.True, "Failed to logon session added to empty initiator");
+
+        // Removing the last session leaves the initiator running and empty again
+        Assert.That(_initiator.RemoveSession(sessionId, true), Is.True, "Failed to remove last session");
+        Assert.That(WaitForDisconnect(dynamicCompId), Is.True, "Socket still connected after session removed");
+        Assert.That(_initiator.IsStopped, Is.False, "Initiator stopped after its last session was removed");
     }
 }

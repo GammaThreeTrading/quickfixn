@@ -38,9 +38,10 @@ namespace QuickFix
             _sessionFactory = new SessionFactory(app, storeFactory, logFactory, msgFactory);
             _nonSessionLog = new NonSessionLog(logFactory);
 
-            HashSet<SessionID> definedSessions = _settings.GetSessions();
-            if (0 == definedSessions.Count)
-                throw new ConfigError("No sessions defined");
+            // An initiator with no [SESSION] blocks is allowed: a newly provisioned
+            // initiator has none until its first session is added with AddSession,
+            // and removing the last session must not make the next start fail.
+            // Start() logs the empty case and the connect loop idles until then.
         }
 
         public void Start()
